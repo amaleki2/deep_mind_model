@@ -5,7 +5,7 @@ import numpy as np
 from torch_geometric.data import Data, DataLoader
 
 from graph_networks import GraphNetworkMetaLayer, GraphNetworkGNLayer, EncodeProcessDecode
-from train_graph import train_sdf
+from train_graph import train_sdf, plot_sdf_results
 
 
 def get_sdf_data_loader(n_objects, data_folder, batch_size, eval_frac=0.2,
@@ -72,28 +72,30 @@ def add_reversed_edges(edges):
     return edges
 
 
-assert len(sys.argv) == 2
-data_folder = sys.argv[1]
-edge_weight = True
+if __name__ == "__main__":
+    assert len(sys.argv) == 2
+    data_folder = sys.argv[1]
+    edge_weight = True
 
-n_objects, batch_size, n_epoch = 25, 1, 1500
-lr_0, step_size, gamma, radius = 0.001, 200, 0.6, 0.1
+    n_objects, batch_size, n_epoch = 25, 1, 150
+    lr_0, step_size, gamma, radius = 0.001, 200, 0.6, 0.1
 
-train_data, test_data = get_sdf_data_loader(n_objects, data_folder, batch_size, edge_weight=edge_weight)
+    train_data, test_data = get_sdf_data_loader(n_objects, data_folder, batch_size, edge_weight=edge_weight)
 
-n_edge_feat_in, n_edge_feat_out = 1, 1
-n_node_feat_in, n_node_feat_out = 3, 1
-n_global_feat = 2
+    n_edge_feat_in, n_edge_feat_out = 1, 1
+    n_node_feat_in, n_node_feat_out = 3, 1
+    n_global_feat = 2
 
-model = GraphNetworkMetaLayer(n_edge_feat_in, n_edge_feat_out,
-                              n_node_feat_in, n_node_feat_out,
-                              n_global_feat, n_global_feat,
-                              latent_size=128,
-                              activate_final=False)
+    model = GraphNetworkMetaLayer(n_edge_feat_in, n_edge_feat_out,
+                                  n_node_feat_in, n_node_feat_out,
+                                  n_global_feat, n_global_feat,
+                                  latent_size=128,
+                                  activate_final=False)
 
-l1_loss = torch.nn.L1Loss()
+    l1_loss = torch.nn.L1Loss()
 
-train_sdf(model, train_data, loss_func=l1_loss, use_cpu=True, n_epoch=n_epoch)
+    # train_sdf(model, train_data, loss_func=l1_loss, use_cpu=False, n_epoch=n_epoch)
 
-# plot_results(model, train_data, ndata=5, levels=[-0.2, 0, 0.2, 0.4], border=0.1, save_name="test")
-# plot_results_over_line(model, train_data, ndata=5, save_name="test")
+    plot_sdf_results(model, train_data)
+    # plot_results(model, train_data, ndata=5, levels=[-0.2, 0, 0.2, 0.4], border=0.1, save_name="test")
+    # plot_results_over_line(model, train_data, ndata=5, save_name="test")
