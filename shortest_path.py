@@ -8,8 +8,8 @@ import matplotlib.pyplot as plt
 import torch
 from torch.nn import CrossEntropyLoss
 from torch_geometric.data import Data, DataLoader
-from graph_networks import EncodeProcessDecode, GraphNetworkMetaLayer, GraphNetworkGNLayer
-
+from graph_networks import EncodeProcessDecode, GraphNetworkMetaLayer, GraphNetworkGNLayer, EncodeProcessDecode2, EncodeProcessDecode3
+from train_graph import train_shortest_path
 DISTANCE_WEIGHT_NAME = "distance"  # The name for the distance edge attribute.
 
 
@@ -37,11 +37,7 @@ def get_node_dict(graph, attr):
     return {k: v[attr] for k, v in graph.nodes.items()}
 
 
-def generate_graph(rand,
-                   num_nodes_min_max,
-                   dimensions=2,
-                   theta=1000.0,
-                   rate=1.0):
+def generate_graph(rand, num_nodes_min_max, dimensions=2, theta=20.0, rate=1.0):
     """Creates a connected graph.
 
     The graphs are geographic threshold graphs, but with added edges via a
@@ -301,6 +297,7 @@ def compute_accuracy(y_in, x_out, edge_attr_out, global_attr_out):
     c_all = torch.all(c)
     return torch.cat([c_mean.view(1), c_all.float().view(1)])
 
+
 seed = 1
 rand = np.random.RandomState(seed=seed)
 theta = 20   # Large values (1000+) make trees. Try 20-60 for good non-trees.
@@ -313,7 +310,6 @@ num_test_examples = 50
 num_test_nodes_min_max = (8, 17)
 x_data_test_loader, y_data_test_loader = setup_data_loader(rand, num_test_examples, num_test_nodes_min_max, theta)
 
-
 n_edge_feat_in, n_edge_feat_out = 1, 2
 n_node_feat_in, n_node_feat_out = 5, 2
 n_global_feat = 1
@@ -323,10 +319,6 @@ n_global_feat = 1
 #                               latent_size=128,
 #                               activate_final=False)
 
-model = EncodeProcessDecode(n_edge_feat_in=n_edge_feat_in, n_edge_feat_out=n_edge_feat_out,
-                            n_node_feat_in=n_node_feat_in, n_node_feat_out=n_node_feat_out,
-                            n_global_feat_in=n_global_feat, n_global_feat_out=n_global_feat,
-                            mlp_latent_size=128)
 
 # model = GraphNetworkGNLayer(n_edge_feat_in, n_edge_feat_out,
 #                             n_node_feat_in, n_node_feat_out,
@@ -334,41 +326,25 @@ model = EncodeProcessDecode(n_edge_feat_in=n_edge_feat_in, n_edge_feat_out=n_edg
 #                             latent_size=256,
 #                             activate_final=False)
 
-from train import train
-train(model, x_data_loader, y_data_loader, create_loss_ops_GN,
-      test_data=(x_data_test_loader, y_data_test_loader),
-      accuracy_func=compute_accuracy, n_epoch=1000, print_every=50)
 
-# device = torch.device('cuda')
-# model = model.to(device=device)
-# optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-#
-# n_epoch = 1000
-# for epoch in range(n_epoch):
-#     epoch_loss = 0
-#     epoch_acc  = 0
-#     epoch_corr = 0
-#     for x_in, y_in in zip(x_data_loader, y_data_loader):
-#         x_in.to(device=device)
-#         y_in.to(device=device)
-#         model.train()
-#         optimizer.zero_grad()
-#
-#         x_out, edge_attr_out, global_attr_out = model(x_in.x, x_in.edge_index, x_in.edge_attr, x_in.u)
-#         loss = create_loss_ops_GN(y_in, x_out, edge_attr_out)
-#
-#         # x_pred = model(x_in, num_processing_steps=3)
-#         # loss = torch.mean(create_loss_ops(y_in, x_pred))
-#
-#         loss.backward()
-#         optimizer.step()
-#         epoch_loss += loss
-#         acc, corr = compute_accuracy(y_in, x_out, edge_attr_out)
-#         epoch_acc += acc
-#         epoch_corr += corr
-#     epoch_loss = epoch_loss / len(x_data_loader)
-#     epoch_acc = epoch_acc / len(x_data_loader)
-#     epoch_corr = epoch_corr.float() / len(x_data_loader)
-#     if epoch % 25 == 0:
-#         print("epoch %d: loss: %0.3f, acc:%0.2f, corr:%0.2f" %(epoch, epoch_loss.item(),
-#                                                               epoch_acc.item(), epoch_corr.item()))
+# model = EncodeProcessDecode(n_edge_feat_in=n_edge_feat_in, n_edge_feat_out=n_edge_feat_out,
+#                             n_node_feat_in=n_node_feat_in, n_node_feat_out=n_node_feat_out,
+#                             n_global_feat_in=n_global_feat, n_global_feat_out=n_global_feat,
+#                             mlp_latent_size=16, num_processing_steps=10, full_output=True,
+#                             graph_layer=GraphNetworkGNLayer)
+
+
+model = EncodeProcessDecode2(n_edge_feat_in=n_edge_feat_in, n_edge_feat_out=n_edge_feat_out,
+                             n_node_feat_in=n_node_feat_in, n_node_feat_out=n_node_feat_out,
+                             n_global_feat_in=n_global_feat, n_global_feat_out=n_global_feat,
+                             mlp_latent_size=16, num_processing_steps=4, full_output=True,
+                             graph_layer=GraphNetworkGNLayer)
+
+# model = EncodeProcessDecode3(n_edge_feat_in=n_edge_feat_in, n_edge_feat_out=n_edge_feat_out,
+#                              n_node_feat_in=n_node_feat_in, n_node_feat_out=n_node_feat_out,
+#                              n_global_feat_in=n_global_feat, n_global_feat_out=n_global_feat,
+#                              mlp_latent_size=16, num_processing_steps=4, full_output=True)
+
+train_shortest_path(model, x_data_loader, y_data_loader, create_loss_ops_GN,
+                    test_data=(x_data_test_loader, y_data_test_loader), lr_0=0.0001,
+                    accuracy_func=compute_accuracy, n_epoch=5000, print_every=50, step_size=5000)

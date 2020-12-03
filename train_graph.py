@@ -40,9 +40,17 @@ def train_shortest_path(model, x_data_loader, y_data_loader, loss_func,
             y_in.to(device=device)
             model.train()
             optimizer.zero_grad()
+            output = model(x_in.x, x_in.edge_index, x_in.edge_attr, x_in.u)
 
-            x_out, edge_attr_out, global_attr_out = model(x_in.x, x_in.edge_index, x_in.edge_attr, x_in.u)
-            loss = loss_func(y_in, x_out, edge_attr_out, global_attr_out)
+            if not hasattr(model, 'full_output') or model.full_output is False:
+                x_out, edge_attr_out, global_attr_out = output
+                loss = loss_func(y_in, x_out, edge_attr_out, global_attr_out)
+            else:
+                loss = [loss_func(y_in, x_out, edge_attr_out, global_attr_out)
+                        for x_out, edge_attr_out, global_attr_out in output]
+                loss = sum(loss) / len(loss)
+                x_out, edge_attr_out, global_attr_out = output[-1]
+
             if accuracy_func is not None:
                 acc = accuracy_func(y_in, x_out, edge_attr_out, global_attr_out)
                 epoch_metric = torch.cat((loss.view(1), acc))
@@ -56,6 +64,7 @@ def train_shortest_path(model, x_data_loader, y_data_loader, loss_func,
             loss.backward()
             optimizer.step()
         epoch_metrics = epoch_metrics / len(x_data_loader)
+        scheduler.step()
 
         if epoch % print_every == 0:
             epoch_metrics_test = torch.zeros_like(epoch_metrics)
@@ -66,10 +75,11 @@ def train_shortest_path(model, x_data_loader, y_data_loader, loss_func,
                     y_in_test.to(device=device)
                     model.eval()
 
-                    x_out_test, edge_attr_out_test, global_attr_out_test = model(x_in_test.x,
-                                                                                 x_in_test.edge_index,
-                                                                                 x_in_test.edge_attr,
-                                                                                 x_in_test.u)
+                    output_test = model(x_in_test.x, x_in_test.edge_index, x_in_test.edge_attr, x_in_test.u)
+                    if hasattr(model, 'full_output') and model.full_output:
+                        x_out_test, edge_attr_out_test, global_attr_out_test = output_test[-1]
+                    else:
+                        x_out_test, edge_attr_out_test, global_attr_out_test = output_test
                     loss_test = loss_func(y_in_test, x_out_test, edge_attr_out_test, global_attr_out_test)
                     if accuracy_func is not None:
                         acc_test = accuracy_func(y_in_test, x_out_test, edge_attr_out_test, global_attr_out_test)
@@ -81,8 +91,8 @@ def train_shortest_path(model, x_data_loader, y_data_loader, loss_func,
             epoch_metrics_test = epoch_metrics_test / len(x_test_data_loader)
             epoch_metric_print_ready = [round(x, 3) for x in epoch_metrics.tolist()]
             epoch_metrics_test_print_ready = [round(x, 3) for x in epoch_metrics_test.tolist()]
-            print("epoch %d: training metrics:" % epoch, epoch_metric_print_ready,
-                  ", test metrics:", epoch_metrics_test_print_ready)
+            print("epoch %d: lr: %0.5e, training metrics:" % (epoch, optimizer.param_groups[0]['lr']),
+                  epoch_metric_print_ready, ", test metrics:", epoch_metrics_test_print_ready)
 
 
 def train_sdf(model, train_data, loss_func=None, use_cpu=False, save_name="",
@@ -118,7 +128,7 @@ def train_sdf(model, train_data, loss_func=None, use_cpu=False, save_name="",
         scheduler.step()
 
         if epoch % print_every == 0:
-            print("epoch %d: training loss:%0.4f" % (epoch, epoch_loss.item()))
+            print("epoch %d: training loss:%0.4f" % (epoch, epoch_loss))
             torch.save(model.state_dict(), "models/model" + save_name + ".pth")
             np.save("models/loss" + save_name + ".npy", epoch_loss_list)
 

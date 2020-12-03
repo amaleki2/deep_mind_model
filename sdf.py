@@ -86,15 +86,20 @@ if __name__ == "__main__":
     n_node_feat_in, n_node_feat_out = 3, 1
     n_global_feat = 2
 
-    model = GraphNetworkMetaLayer(n_edge_feat_in, n_edge_feat_out,
-                                  n_node_feat_in, n_node_feat_out,
-                                  n_global_feat, n_global_feat,
-                                  latent_size=128,
-                                  activate_final=False)
+    # model = GraphNetworkMetaLayer(n_edge_feat_in, n_edge_feat_out,
+    #                               n_node_feat_in, n_node_feat_out,
+    #                               n_global_feat, n_global_feat,
+    #                               latent_size=128,
+    #                               activate_final=False)
+
+    model = EncodeProcessDecode(n_edge_feat_in=n_edge_feat_in, n_edge_feat_out=n_edge_feat_out,
+                                n_node_feat_in=n_node_feat_in, n_node_feat_out=n_node_feat_out,
+                                n_global_feat_in=n_global_feat, n_global_feat_out=n_global_feat,
+                                mlp_latent_size=128)
 
     l1_loss = torch.nn.L1Loss()
 
-    # train_sdf(model, train_data, loss_func=l1_loss, use_cpu=False, n_epoch=n_epoch)
+    train_sdf(model, train_data, loss_func=l1_loss, use_cpu=True, n_epoch=n_epoch)
 
     plot_sdf_results(model, train_data)
     # plot_results(model, train_data, ndata=5, levels=[-0.2, 0, 0.2, 0.4], border=0.1, save_name="test")
