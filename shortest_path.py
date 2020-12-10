@@ -3,13 +3,13 @@ import collections
 import numpy as np
 import networkx as nx
 from scipy import spatial
-import matplotlib.pyplot as plt
 
 import torch
 from torch.nn import CrossEntropyLoss
 from torch_geometric.data import Data, DataLoader
-from graph_networks import EncodeProcessDecode, GraphNetworkMetaLayer, GraphNetworkGNLayer, EncodeProcessDecode2, EncodeProcessDecode3
-from train_graph import train_shortest_path
+from graph_networks import EncodeProcessDecode, GraphNetworkIndependentBlock
+from graph_base_models import get_edge_counts
+
 DISTANCE_WEIGHT_NAME = "distance"  # The name for the distance edge attribute.
 
 
@@ -260,7 +260,7 @@ def get_data_from_networkx(graph_nx, is_target=False):
     return data
 
 
-def setup_data_loader(rand, num_examples, num_nodes_min_max, theta):
+def setup_data_loader(rand, num_examples, num_nodes_min_max, theta, batch_size=None):
     """Generate torch_geometric data from graphs for training and testing.
 
         Args:
@@ -268,83 +268,178 @@ def setup_data_loader(rand, num_examples, num_nodes_min_max, theta):
             num_examples: number of examples for train and test
             num_nodes_min_max: a tuple of min and max number of nodes
             theta: parameter to control graph generation.
-
+            batch_size: batch size
         Returns:
             x_data_loader, y_data_loader: objects of type torch_geometric.data.DataLoader
         """
+    # batch_size = num_examples if batch_size is None else batch_size
+    batch_size = num_examples if batch_size is None else batch_size
     input_graphs, target_graphs, _ = generate_networkx_graphs(rand, num_examples, num_nodes_min_max, theta)
     X = [get_data_from_networkx(input_graph) for input_graph in input_graphs]
     Y = [get_data_from_networkx(target_graph, is_target=True) for target_graph in target_graphs]
-    x_data_loader = DataLoader(X, batch_size=1)
-    y_data_loader = DataLoader(Y, batch_size=1)
+    x_data_loader = DataLoader(X, batch_size=batch_size)
+    y_data_loader = DataLoader(Y, batch_size=batch_size)
     return x_data_loader, y_data_loader
 
 
-def create_loss_ops_GN(y_in, x_out, edge_attr_out, global_attr_out):
-    loss_nodes = CrossEntropyLoss()(x_out, y_in.x)
-    loss_edges = CrossEntropyLoss()(edge_attr_out, y_in.edge_attr)
-    loss = loss_nodes + loss_edges #+ loss_global
+ce_loss = CrossEntropyLoss()
+def create_loss_ops_GN(y, x):
+    """
+    loss function for shortest path example
+    :param y: target graph
+    :param x: predicted graph
+    :return: a list of loss values
+    """
+    loss_nodes = ce_loss(x.x, y.x)
+    loss_edges = ce_loss(x.edge_attr, y.edge_attr)
+    loss = loss_nodes + loss_edges
     return loss
 
 
-def compute_accuracy(y_in, x_out, edge_attr_out, global_attr_out):
-    x_out_args = torch.argmax(x_out, dim=1)
-    edge_attr_out_args = torch.argmax(edge_attr_out, dim=1)
-    c1 = x_out_args == y_in.x
-    c2 = edge_attr_out_args == y_in.edge_attr
-    c = torch.cat([c1, c2])
+def compute_accuracy_batched(y, x):
+    """
+    compute accuracy for the shortest path problem when graphs are batched.
+    :param y: target graph
+    :param x: predicted graph
+    :return:
+    """
+    node_counts = torch.unique(x.batch, return_counts=True)[1]
+    edge_counts = get_edge_counts(x)
+    # assert torch.all(node_counts == torch.unique(y.batch, return_counts=True)[1])
+    # assert torch.all(get_edge_counts(y) == edge_counts)
+    node_indices = torch.cumsum(node_counts, dim=0)
+    edge_indices = torch.cumsum(edge_counts, dim=0)
+    node_istart = 0
+    edge_istart = 0
+    acc_batch = 0
+    for node_iend, edge_iend in zip(node_indices, edge_indices):
+        x_edge_attr = x.edge_attr[edge_istart:edge_iend]
+        x_node_attr = x.x[node_istart:node_iend]
+        y_edge_attr = y.edge_attr[edge_istart:edge_iend]
+        y_node_attr = y.x[node_istart:node_iend]
+        acc = compute_accuracy(x_edge_attr, x_node_attr, y_edge_attr, y_node_attr)
+        acc_batch += acc
+        node_istart = node_iend
+        edge_istart = edge_iend
+    acc_batch /= x.num_graphs
+    return acc_batch
+
+
+def compute_accuracy(x_edge_attr, x_node_attr, y_edge_attr, y_node_attr, use_edges=False):
+    c1 = torch.argmax(x_node_attr, dim=1) == y_node_attr
+    if use_edges:
+        c2 = torch.argmax(x_edge_attr, dim=1) == y_edge_attr
+        c = torch.cat([c1, c2])
+    else:
+        c = c1
     c_mean = torch.mean(c.float())
     c_all = torch.all(c)
     return torch.cat([c_mean.view(1), c_all.float().view(1)])
 
 
-seed = 1
-rand = np.random.RandomState(seed=seed)
-theta = 20   # Large values (1000+) make trees. Try 20-60 for good non-trees.
+def train_batched(model, data_generator, train_data_params, test_data_params, loss_func,
+                  accuracy_func=None, use_cpu=False, lr_0=0.001, n_epoch=101,
+                  print_every=10, step_size=50, gamma=0.5):
+    if use_cpu:
+        device = torch.device('cpu')
+    else:
+        device = torch.device('cuda')
+        # gpu_id = find_best_gpu()
+        # if gpu_id:
+        #     torch.cuda.set_device(gpu_id)
 
-num_training_examples = 50
-num_training_nodes_min_max = (8, 17)
-x_data_loader, y_data_loader = setup_data_loader(rand, num_training_examples, num_training_nodes_min_max, theta)
+    model = model.to(device=device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr_0)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
 
-num_test_examples = 50
-num_test_nodes_min_max = (8, 17)
-x_data_test_loader, y_data_test_loader = setup_data_loader(rand, num_test_examples, num_test_nodes_min_max, theta)
+    for epoch in range(n_epoch):
+        epoch_metrics = None
+        x_data_loader, y_data_loader = data_generator(*train_data_params)
+        for x_in, y in zip(x_data_loader, y_data_loader):
+            x_in.to(device=device)
+            y.to(device=device)
+            model.train()
+            optimizer.zero_grad()
+            output = model(x_in)
 
-n_edge_feat_in, n_edge_feat_out = 1, 2
-n_node_feat_in, n_node_feat_out = 5, 2
-n_global_feat = 1
-# model = GraphNetworkMetaLayer(n_edge_feat_in, n_edge_feat_out,
-#                               n_node_feat_in, n_node_feat_out,
-#                               n_global_feat, n_global_feat,
-#                               latent_size=128,
-#                               activate_final=False)
+            if not hasattr(model, 'full_output') or model.full_output is False:
+                x_out = output
+                loss = loss_func(y, x_out)
+            else:
+                loss = [loss_func(y, x_out) for x_out in output]
+                loss = sum(loss) / len(loss)
+                x_out = output[-1]
+
+            if accuracy_func is not None:
+                acc = accuracy_func(y, x_out)
+                epoch_metric = torch.cat((loss.view(1), acc))
+            else:
+                epoch_metric = loss
+
+            if epoch_metrics is None:
+                epoch_metrics = epoch_metric
+            else:
+                epoch_metrics += epoch_metric
+            loss.backward()
+            optimizer.step()
+        epoch_metrics = epoch_metrics / len(x_data_loader)
+        scheduler.step()
+
+        if epoch % print_every == 0:
+            epoch_metrics_test = torch.zeros_like(epoch_metrics)
+            x_test_data_loader, y_test_data_loader = data_generator(*test_data_params)
+            for x_in_test, y_test in zip(x_test_data_loader, y_test_data_loader):
+                x_in_test.to(device=device)
+                y_test.to(device=device)
+                model.eval()
+
+                output_test = model(x_in_test)
+                if hasattr(model, 'full_output') and model.full_output:
+                    x_out_test = output_test[-1]
+                else:
+                    x_out_test = output_test
+                loss_test = loss_func(y_test, x_out_test)
+                if accuracy_func is not None:
+                    acc_test = accuracy_func(y_test, x_out_test)
+                    epoch_metric_test = torch.cat((loss_test.view(1), acc_test))
+                else:
+                    epoch_metric_test = loss_test
+
+                epoch_metrics_test += epoch_metric_test
+            epoch_metrics_test = epoch_metrics_test / len(x_test_data_loader)
+            epoch_metric_print_ready = [round(x, 3) for x in epoch_metrics.tolist()]
+            epoch_metrics_test_print_ready = [round(x, 3) for x in epoch_metrics_test.tolist()]
+            print("epoch %d: lr: %0.5e, training metrics:" % (epoch, optimizer.param_groups[0]['lr']),
+                  epoch_metric_print_ready, ", test metrics:", epoch_metrics_test_print_ready)
 
 
-# model = GraphNetworkGNLayer(n_edge_feat_in, n_edge_feat_out,
-#                             n_node_feat_in, n_node_feat_out,
-#                             n_global_feat, n_global_feat,
-#                             latent_size=256,
-#                             activate_final=False)
+if __name__ == "__main__":
+    seed = 1
+    rand = np.random.RandomState(seed=seed)
+    theta = 20   # Large values (1000+) make trees. Try 20-60 for good non-trees.
 
+    num_training_examples = 32
+    num_training_nodes_min_max = (8, 17)
+    x_data_loader, y_data_loader = setup_data_loader(rand, num_training_examples, num_training_nodes_min_max, theta)
 
-# model = EncodeProcessDecode(n_edge_feat_in=n_edge_feat_in, n_edge_feat_out=n_edge_feat_out,
-#                             n_node_feat_in=n_node_feat_in, n_node_feat_out=n_node_feat_out,
-#                             n_global_feat_in=n_global_feat, n_global_feat_out=n_global_feat,
-#                             mlp_latent_size=16, num_processing_steps=10, full_output=True,
-#                             graph_layer=GraphNetworkGNLayer)
+    num_test_examples = 100
+    num_test_nodes_min_max = (16, 33)
+    x_data_test_loader, y_data_test_loader = setup_data_loader(rand, num_test_examples, num_test_nodes_min_max, theta)
 
+    n_edge_feat_in, n_edge_feat_out = 1, 2
+    n_node_feat_in, n_node_feat_out = 5, 2
+    n_global_feat = 1
 
-model = EncodeProcessDecode2(n_edge_feat_in=n_edge_feat_in, n_edge_feat_out=n_edge_feat_out,
-                             n_node_feat_in=n_node_feat_in, n_node_feat_out=n_node_feat_out,
-                             n_global_feat_in=n_global_feat, n_global_feat_out=n_global_feat,
-                             mlp_latent_size=16, num_processing_steps=4, full_output=True,
-                             graph_layer=GraphNetworkGNLayer)
+    model = EncodeProcessDecode(n_edge_feat_in=n_edge_feat_in, n_edge_feat_out=n_edge_feat_out,
+                                n_node_feat_in=n_node_feat_in, n_node_feat_out=n_node_feat_out,
+                                n_global_feat_in=n_global_feat, n_global_feat_out=n_global_feat,
+                                mlp_latent_size=16, num_processing_steps=10, full_output=True,
+                                encoder=GraphNetworkIndependentBlock, decoder=GraphNetworkIndependentBlock,
+                                output_transformer=GraphNetworkIndependentBlock
+                                )
 
-# model = EncodeProcessDecode3(n_edge_feat_in=n_edge_feat_in, n_edge_feat_out=n_edge_feat_out,
-#                              n_node_feat_in=n_node_feat_in, n_node_feat_out=n_node_feat_out,
-#                              n_global_feat_in=n_global_feat, n_global_feat_out=n_global_feat,
-#                              mlp_latent_size=16, num_processing_steps=4, full_output=True)
-
-train_shortest_path(model, x_data_loader, y_data_loader, create_loss_ops_GN,
-                    test_data=(x_data_test_loader, y_data_test_loader), lr_0=0.0001,
-                    accuracy_func=compute_accuracy, n_epoch=5000, print_every=50, step_size=5000)
+    train_data_generator_params = (rand, num_training_examples, num_training_nodes_min_max, theta)
+    test_data_generator_params = (rand, num_test_examples, num_test_nodes_min_max, theta)
+    train_batched(model, setup_data_loader, train_data_generator_params, test_data_generator_params,
+                  create_loss_ops_GN, accuracy_func=compute_accuracy_batched,
+                  lr_0=0.001, n_epoch=5000, print_every=50, step_size=400, gamma=0.2)

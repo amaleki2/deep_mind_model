@@ -95,6 +95,8 @@ def train_shortest_path(model, x_data_loader, y_data_loader, loss_func,
                   epoch_metric_print_ready, ", test metrics:", epoch_metrics_test_print_ready)
 
 
+
+
 def train_sdf(model, train_data, loss_func=None, use_cpu=False, save_name="",
               lr_0=0.001, n_epoch=101, print_every=10, step_size=50, gamma=0.5):
     assert loss_func is not None, "loss function should be specified"
@@ -118,8 +120,15 @@ def train_sdf(model, train_data, loss_func=None, use_cpu=False, save_name="",
             model.train()
             optimizer.zero_grad()
 
-            x_out, edge_attr_out, global_attr_out = model(data.x, data.edge_index, data.edge_attr, data.u)
-            loss = loss_func(x_out, data.y)
+            output = model(data)
+            if not hasattr(model, 'full_output') or model.full_output is False:
+                x_out, edge_attr_out, global_attr_out = output
+                loss = loss_func(x_out, data.y)
+            else:
+                loss = [loss_func(out.x, data.y)
+                        for out in output]
+                loss = sum(loss) / len(loss)
+
             epoch_loss += loss.item()
             loss.backward()
             optimizer.step()
