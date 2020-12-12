@@ -87,18 +87,23 @@ def cast_globals_to_edges(global_attr, edge_index=None, batch=None, num_edges=No
 
 
 def cast_edges_to_globals(edge_attr, edge_index=None, batch=None, num_edges=None, num_globals=None):
-    assert batch is not None and edge_index is not None and num_edges is not None and num_globals is not None
-    node_indices = torch.unique(batch)
-    edge_counts = get_edge_counts(edge_index, batch)
-    assert sum(edge_counts) == num_edges
-    indices = [idx.view(1, 1) for idx, count in zip(node_indices, edge_counts) for _ in range(count)]
-    indices = torch.cat(indices)
-    edge_attr_aggr = scatter_sum(edge_attr, index=indices, dim=0, dim_size=num_globals)
+    if batch is None:
+        edge_attr_aggr = torch.sum(edge_attr, dim=0, keepdim=True)
+    else:
+        node_indices = torch.unique(batch)
+        edge_counts = get_edge_counts(edge_index, batch)
+        assert sum(edge_counts) == num_edges
+        indices = [idx.view(1, 1) for idx, count in zip(node_indices, edge_counts) for _ in range(count)]
+        indices = torch.cat(indices)
+        edge_attr_aggr = scatter_sum(edge_attr, index=indices, dim=0, dim_size=num_globals)
     return edge_attr_aggr
 
 
 def cast_nodes_to_globals(node_attr, batch=None, num_globals=None):
-    x_aggr = scatter_sum(node_attr, index=batch, dim=0, dim_size=num_globals)
+    if batch is None:
+        x_aggr = torch.sum(node_attr, dim=0, keepdim=True)
+    else:
+        x_aggr = scatter_sum(node_attr, index=batch, dim=0, dim_size=num_globals)
     return x_aggr
 
 
