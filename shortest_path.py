@@ -275,7 +275,7 @@ def setup_data_loader(rand, num_examples, num_nodes_min_max, theta, batch_size=N
     # batch_size = num_examples if batch_size is None else batch_size
     batch_size = num_examples if batch_size is None else batch_size
     input_graphs, target_graphs, _ = generate_networkx_graphs(rand, num_examples, num_nodes_min_max, theta)
-    X = [get_data_from_networkx(input_graph) for input_graph in input_graphs]
+    X = [get_data_from_networkx(input_graph, is_target=False) for input_graph in input_graphs]
     Y = [get_data_from_networkx(target_graph, is_target=True) for target_graph in target_graphs]
     x_data_loader = DataLoader(X, batch_size=batch_size)
     y_data_loader = DataLoader(Y, batch_size=batch_size)
@@ -407,8 +407,12 @@ def train_batched(model, data_generator, train_data_params, test_data_params, lo
 
                 epoch_metrics_test += epoch_metric_test
             epoch_metrics_test = epoch_metrics_test / len(x_test_data_loader)
-            epoch_metric_print_ready = [round(x, 3) for x in epoch_metrics.tolist()]
-            epoch_metrics_test_print_ready = [round(x, 3) for x in epoch_metrics_test.tolist()]
+            if accuracy_func is None:
+                epoch_metric_print_ready = round(epoch_metrics.tolist(), 3)
+                epoch_metrics_test_print_ready = round(epoch_metrics_test.tolist(), 3)
+            else:
+                epoch_metric_print_ready = [round(x, 3) for x in epoch_metrics.tolist()]
+                epoch_metrics_test_print_ready = [round(x, 3) for x in epoch_metrics_test.tolist()]
             print("epoch %d: lr: %0.5e, training metrics:" % (epoch, optimizer.param_groups[0]['lr']),
                   epoch_metric_print_ready, ", test metrics:", epoch_metrics_test_print_ready)
 
@@ -433,7 +437,7 @@ if __name__ == "__main__":
     model = EncodeProcessDecode(n_edge_feat_in=n_edge_feat_in, n_edge_feat_out=n_edge_feat_out,
                                 n_node_feat_in=n_node_feat_in, n_node_feat_out=n_node_feat_out,
                                 n_global_feat_in=n_global_feat, n_global_feat_out=n_global_feat,
-                                mlp_latent_size=16, num_processing_steps=10, full_output=True,
+                                mlp_latent_size=64, num_processing_steps=10, full_output=True,
                                 encoder=GraphNetworkIndependentBlock, decoder=GraphNetworkIndependentBlock,
                                 output_transformer=GraphNetworkIndependentBlock
                                 )
@@ -441,5 +445,6 @@ if __name__ == "__main__":
     train_data_generator_params = (rand, num_training_examples, num_training_nodes_min_max, theta)
     test_data_generator_params = (rand, num_test_examples, num_test_nodes_min_max, theta)
     train_batched(model, setup_data_loader, train_data_generator_params, test_data_generator_params,
-                  create_loss_ops_GN, accuracy_func=compute_accuracy_batched,
-                  lr_0=0.001, n_epoch=5000, print_every=50, step_size=400, gamma=0.2)
+                  loss_func=create_loss_ops_GN,
+                  #accuracy_func=compute_accuracy_batched,
+                  lr_0=0.001, n_epoch=10000, print_every=200, step_size=5000, gamma=0.25)

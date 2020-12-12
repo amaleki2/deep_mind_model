@@ -1,7 +1,5 @@
-import torch
 import torch.nn
-from graph_base_models import (IndependentEdgeMode, IndependentNodeModel, IndependentGlobalModel,
-                               NodeModel, EdgeModel, GlobalModel)
+from graph_base_models import *
 from torch_geometric.data import Batch
 
 
@@ -45,8 +43,16 @@ class GraphNetworkBlock(torch.nn.Module):
             if hasattr(item, 'reset_parameters'):
                 item.reset_parameters()
 
-    def forward(self, data):
-        return self.global_model(self.node_model(self.edge_model(data)))
+    def forward(self, edge_attr, node_attr, global_attr,
+                receiver_attr=None, sender_attr=None,
+                global_attr_to_edge=None, global_attr_to_nodes=None,
+                receiver_attr_to_nodes=None, sender_attr_to_node=None,
+                node_attr_to_global=None, edge_attr_to_global=None
+                ):
+        edge_attr_new = self.edge_model(receiver_attr, sender_attr, edge_attr, global_attr_to_edge)
+        node_attr_new = self.node_model(node_attr, global_attr_to_nodes, receiver_attr_to_nodes, sender_attr_to_node)
+        global_attr_new = self.global_model(node_attr_to_global, edge_attr_to_global, global_attr)
+        return edge_attr_new, node_attr_new, global_attr_new
 
 
 class GraphNetworkIndependentBlock(torch.nn.Module):
@@ -58,7 +64,7 @@ class GraphNetworkIndependentBlock(torch.nn.Module):
                  activate_final=True,
                  normalize=True):
         super(GraphNetworkIndependentBlock, self).__init__()
-        self.edge_model = IndependentEdgeMode(n_edge_feat_in, n_edge_feat_out, latent_size=latent_size,
+        self.edge_model = IndependentEdgeModel(n_edge_feat_in, n_edge_feat_out, latent_size=latent_size,
                                               activate_final=activate_final, normalize=normalize)
         self.node_model = IndependentNodeModel(n_node_feat_in, n_node_feat_out, latent_size=latent_size,
                                                activate_final=activate_final, normalize=normalize)
@@ -71,8 +77,8 @@ class GraphNetworkIndependentBlock(torch.nn.Module):
             if hasattr(item, 'reset_parameters'):
                 item.reset_parameters()
 
-    def forward(self, data):
-        return self.global_model(self.node_model(self.edge_model(data)))
+    def forward(self, edge_attr, node_attr, global_attr, **kwargs):
+        return self.edge_model(edge_attr), self.node_model(node_attr), self.global_model(global_attr)
 
 
 class EncodeProcessDecode(torch.nn.Module):
@@ -119,22 +125,53 @@ class EncodeProcessDecode(torch.nn.Module):
                                                      latent_size=mlp_latent_size // 2 + 1,
                                                      activate_final=False, normalize=False)
 
+    def get_all_casted(self, edge_attr, edge_index, node_attr, global_attr, batch, num_edges, num_nodes, num_globals):
+        row, col = data.edge_index
+        sender_attr, receiver_attr = node_attr[row, :], node_attr[col, :]
+        global_attr_to_edge = cast_globals_to_edges(global_attr, edge_index=edge_index, batch=batch,
+                                                    num_edges=num_edges)
+        global_attr_to_nodes = cast_globals_to_nodes(global_attr, batch=batch, num_nodes=num_nodes)
+        sender_attr_to_nodes = cast_edges_to_nodes(edge_attr, row, num_nodes=num_nodes)
+        receiver_attr_to_node = cast_edges_to_nodes(edge_attr, col, num_nodes=num_nodes)
+        node_attr_to_global = cast_nodes_to_globals(node_attr, batch=batch, num_globals=num_globals)
+        edge_attr_to_global = cast_edges_to_globals(edge_attr, edge_index=edge_index, batch=batch,
+                                                    num_edges=num_edges, num_globals=num_globals)
+        all_cast_dict = {"receiver_attr": receiver_attr,
+                         "sender_attr": sender_attr,
+                         "global_attr_to_edge": global_attr_to_edge,
+                         "global_attr_to_nodes": global_attr_to_nodes,
+                         "receiver_attr_to_nodes": receiver_attr_to_node,
+                         "sender_attr_to_node": sender_attr_to_nodes,
+                         "node_attr_to_global": node_attr_to_global,
+                         "edge_attr_to_global": edge_attr_to_global}
+        return all_cast_dict
+
     def forward(self, data):
-        data = self.encoder(data)
-        data0 = data.clone()
+        edge_attr, edge_index, node_attr, global_attr, batch = data.edge_attr, data.edge_index, data.x, data.u, data.batch
+        num_edges, num_nodes, num_globals = node_attr.size(0), node_attr.size(0), global_attr.size(0)
+        all_cast_dict = self.get_all_casted(edge_attr, edge_index, node_attr, global_attr,
+                                            batch, num_edges, num_nodes, num_globals)
+        edge_attr, node_attr, global_attr = self.encoder(edge_attr, node_attr, global_attr, all_cast_dict)
+        edge_attr0, node_attr0, global_attr0 = edge_attr.clone(), node_attr.clone(), global_attr.clone()
         output_ops = []
         for _ in range(self.num_processing_steps):
-            data = concat_graph_data(data0, data)
-            data = self.processor(data)
-            decoder_op = self.decoder(data.clone())
-            output_ops.append(self.output_transformer(decoder_op))
+            edge_attr = torch.cat(edge_attr0, edge_attr)
+            node_attr = torch.cat(node_attr0, node_attr)
+            global_attr = torch.cat(global_attr0, global_attr)
+            all_cast_dict = self.get_all_casted(edge_attr, edge_index, node_attr, global_attr,
+                                                batch, num_edges, num_nodes, num_globals)
+            edge_attr, node_attr, global_attr = self.processor(edge_attr, node_attr, global_attr, all_cast_dict)
+            all_cast_dict = self.get_all_casted(edge_attr, edge_index, node_attr, global_attr,
+                                                batch, num_edges, num_nodes, num_globals)
+            edge_attr_de, node_attr_de, global_attr_de = self.decoder(edge_attr, node_attr, global_attr, all_cast_dict)
+            all_cast_dict = self.get_all_casted(edge_attr_de, edge_index, node_attr_de, global_attr_de,
+                                                batch, num_edges, num_nodes, num_globals)
+            output_ops.append(self.output_transformer(edge_attr_de, node_attr_de, global_attr_de, all_cast_dict))
 
         if self.full_output:
             return output_ops
         else:
             return output_ops[-1]
-
-
 
 
 if __name__ == "__main__":

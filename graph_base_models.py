@@ -29,17 +29,16 @@ from torch_scatter import scatter_mean, scatter_sum
 #     ]
 #     edge_counts = torch.cat(edge_counts)
 #     return edge_counts
-def get_edge_counts(data):
-    counts = torch.bincount(data.batch[data.edge_index[0, :]])
-    return counts
+def get_edge_counts(edge_index, batch):
+    return torch.bincount(batch[edge_index[0, :]])
 
 
 def make_mlp_model(n_input, latent_size, n_output, activate_final=False, normalize=True, initializer=False):
     mlp = [Linear(n_input, latent_size),
-           # ReLU(),
-           # Linear(latent_size, latent_size),
-           # ReLU(),
-           # Linear(latent_size, latent_size),
+           ReLU(),
+           Linear(latent_size, latent_size),
+           ReLU(),
+           Linear(latent_size, latent_size),
            ReLU(),
            Linear(latent_size, n_output)]
     if activate_final:
@@ -53,63 +52,64 @@ def make_mlp_model(n_input, latent_size, n_output, activate_final=False, normali
     if initializer:
         for layer in mlp:
             if hasattr(layer, 'weight'):
-                layer.weight.data.fill_(0.35)
+                layer.weight.data.fill_(0.0)
                 layer.bias.data.fill_(0.)
 
     return mlp
 
 
-def cast_globals_to_nodes(data):
-    if hasattr(data, "batch") and data.batch is not None:
-        node_indices, counts = torch.unique(data.batch, return_counts=True)
-        casted_global_attr = [data.u[idx, :] for idx, count in zip(node_indices, counts) for _ in range(count)]
+def cast_globals_to_nodes(global_attr, batch=None, num_nodes=None):
+    if batch is not None:
+        node_indices, counts = torch.unique(batch, return_counts=True)
+        casted_global_attr = [global_attr[idx, :] for idx, count in zip(node_indices, counts) for _ in range(count)]
     else:
-        assert data.u.size(0) == 1, "batch numbers should be provided."
-        casted_global_attr = [data.u] * data.num_nodes
+        assert global_attr.size(0) == 1, "batch numbers should be provided."
+        assert num_nodes is not None, "number of nodes should be specified."
+        casted_global_attr = [global_attr] * num_nodes
     casted_global_attr = torch.cat(casted_global_attr, dim=0)
-    casted_global_attr = casted_global_attr.view(-1, data.u.size(-1))
+    casted_global_attr = casted_global_attr.view(-1, global_attr.size(-1))
     return casted_global_attr
 
 
-def cast_globals_to_edges(data):
-    if hasattr(data, "batch") and data.batch is not None:
-        if hasattr(data, "edge_counts"):
-            edge_counts = data.edge_counts
-        else:
-            edge_counts = get_edge_counts(data)
-        node_indices = torch.unique(data.batch)
-        casted_global_attr = [data.u[idx, :] for idx, count in zip(node_indices, edge_counts) for _ in range(count)]
+def cast_globals_to_edges(global_attr, edge_index=None, batch=None, num_edges=None):
+    if batch is not None:
+        assert edge_index is not None, "edge index should be specified"
+        edge_counts = get_edge_counts(edge_index, batch)
+        node_indices = torch.unique(batch)
+        casted_global_attr = [global_attr[idx, :] for idx, count in zip(node_indices, edge_counts) for _ in range(count)]
     else:
-        assert data.u.size(0) == 1, "batch numbers should be provided."
-        casted_global_attr = [data.u] * data.num_edges
+        assert global_attr.size(0) == 1, "batch numbers should be provided."
+        assert num_edges is not None, "number of edges should be specified"
+        casted_global_attr = [global_attr] * num_edges
     casted_global_attr = torch.cat(casted_global_attr, dim=0)
-    casted_global_attr = casted_global_attr.view(-1, data.u.size(-1))
+    casted_global_attr = casted_global_attr.view(-1, global_attr.size(-1))
     return casted_global_attr
 
 
-def cast_edges_to_globals(data, aggr_func=scatter_sum):
-    node_indices = torch.unique(data.batch)
-    edge_counts = get_edge_counts(data)
-    assert sum(edge_counts) == data.num_edges
+def cast_edges_to_globals(edge_attr, edge_index=None, batch=None, num_edges=None, num_globals=None):
+    assert batch is not None and edge_index is not None and num_edges is not None and num_globals is not None
+    node_indices = torch.unique(batch)
+    edge_counts = get_edge_counts(edge_index, batch)
+    assert sum(edge_counts) == num_edges
     indices = [idx.view(1, 1) for idx, count in zip(node_indices, edge_counts) for _ in range(count)]
     indices = torch.cat(indices)
-    edge_attr_aggr = aggr_func(data.edge_attr, index=indices, dim=0, dim_size=data.u.size(0))
+    edge_attr_aggr = scatter_sum(edge_attr, index=indices, dim=0, dim_size=num_globals)
     return edge_attr_aggr
 
 
-def cast_nodes_to_globals(data, aggr_func=scatter_sum):
-    x_aggr = aggr_func(data.x, index=data.batch, dim=0, dim_size=data.u.size(0))
+def cast_nodes_to_globals(node_attr, batch=None, num_globals=None):
+    x_aggr = scatter_sum(node_attr, index=batch, dim=0, dim_size=num_globals)
     return x_aggr
 
 
-def cast_edges_to_nodes(data, indices, aggr_func=scatter_sum):
-    edge_attr_aggr = aggr_func(data.edge_attr, indices, dim=0, dim_size=data.x.size(0))
+def cast_edges_to_nodes(edge_attr, indices, num_nodes=None):
+    edge_attr_aggr = scatter_sum(edge_attr, indices, dim=0, dim_size=num_nodes)
     return edge_attr_aggr
 
 #+++++++++++++++++++++++++#
 ## block models: simple ###
 #+++++++++++++++++++++++++#
-class IndependentEdgeMode(torch.nn.Module):
+class IndependentEdgeModel(torch.nn.Module):
     def __init__(self,
                  n_edge_feats_in,  # number of input edge features
                  n_edge_feats_out,  # number of output edge features
@@ -117,7 +117,7 @@ class IndependentEdgeMode(torch.nn.Module):
                  activate_final=True,  # use activate for the last layer or not?
                  normalize=True  # batch normalize the output
                  ):
-        super(IndependentEdgeMode, self).__init__()
+        super(IndependentEdgeModel, self).__init__()
         self.params = [n_edge_feats_in, n_edge_feats_out]  # useful for debugging
         self.edge_mlp = make_mlp_model(n_edge_feats_in,
                                        latent_size,
@@ -125,9 +125,8 @@ class IndependentEdgeMode(torch.nn.Module):
                                        activate_final=activate_final,
                                        normalize=normalize)
 
-    def forward(self, data):
-        data.edge_attr = self.edge_mlp(data.edge_attr)
-        return data
+    def forward(self, edge_attr):
+        return self.edge_mlp(edge_attr)
 
 
 class IndependentNodeModel(torch.nn.Module):
@@ -146,9 +145,8 @@ class IndependentNodeModel(torch.nn.Module):
                                        activate_final=activate_final,
                                        normalize=normalize)
 
-    def forward(self, data):
-        data.x = self.node_mlp(data.x)
-        return data
+    def forward(self, node_attr):
+        return self.node_mlp(node_attr)
 
 
 class IndependentGlobalModel(torch.nn.Module):
@@ -169,9 +167,8 @@ class IndependentGlobalModel(torch.nn.Module):
                                                           # https://github.com/pytorch/pytorch/issues/7716
                                          )
 
-    def forward(self, data):
-        data.u = self.global_mlp(data.u)
-        return data
+    def forward(self, global_attr):
+        return self.global_mlp(global_attr)
 
 
 #+++++++++++++++++++++++++#
@@ -196,14 +193,13 @@ class EdgeModel(torch.nn.Module):
                                        activate_final=activate_final,
                                        normalize=normalize)
 
-    def forward(self, data):
-        row, col = data.edge_index
-        sender, receiver = data.x[row, :], data.x[col, :]
-        edge_attr = data.edge_attr
-        global_attr = cast_globals_to_edges(data)
+    def forward(self, receiver, sender, edge_attr, global_attr):
+        # row, col = data.edge_index
+        # sender, receiver = data.x[row, :], data.x[col, :]
+        # edge_attr = data.edge_attr
+        # global_attr = cast_globals_to_edges(data)
         out = torch.cat([receiver, sender, edge_attr, global_attr], dim=1)
-        data.edge_attr = self.edge_mlp(out)
-        return data
+        return self.edge_mlp(out)
 
 
 class NodeModel(torch.nn.Module):
@@ -229,19 +225,23 @@ class NodeModel(torch.nn.Module):
                                        activate_final=activate_final,
                                        normalize=normalize)
 
-    def forward(self, data):
-        row, col = data.edge_index
-        out = [data.x]
-        if not self.senders_turned_off:
-            send_edge_attr_agg = cast_edges_to_nodes(data, row, aggr_func=self.agg_func)
-            out.append(send_edge_attr_agg)
-        recv_edge_attr_agg = cast_edges_to_nodes(data, col, aggr_func=self.agg_func)
-        out.append(recv_edge_attr_agg)
-        global_attr = cast_globals_to_nodes(data)
-        out.append(global_attr)
-        out = torch.cat(out, dim=1)
-        data.x = self.node_mlp(out)
-        return data
+    def forward(self, x, global_attr, recv_edge_attr_agg, send_edge_attr_agg):
+        # row, col = data.edge_index
+        # out = [data.x]
+        # if not self.senders_turned_off:
+        #     send_edge_attr_agg = cast_edges_to_nodes(data, row, aggr_func=self.agg_func)
+        #     out.append(send_edge_attr_agg)
+        # recv_edge_attr_agg = cast_edges_to_nodes(data, col, aggr_func=self.agg_func)
+        # out.append(recv_edge_attr_agg)
+        # global_attr = cast_globals_to_nodes(data)
+        # out.append(global_attr)
+        # out = torch.cat(out, dim=1)
+        # data.x = self.node_mlp(out)
+        if self.senders_turned_off:
+            out = torch.cat([x, recv_edge_attr_agg, global_attr], dim=1)
+        else:
+            out = torch.cat([x, send_edge_attr_agg, recv_edge_attr_agg, global_attr], dim=1)
+        return self.node_mlp(out)
 
 
 class GlobalModel(torch.nn.Module):
@@ -264,71 +264,12 @@ class GlobalModel(torch.nn.Module):
                                                           # https://github.com/pytorch/pytorch/issues/7716
                                          )
 
-    def forward(self, data):
-        x_aggr = cast_nodes_to_globals(data)
-        edge_attr_aggr = cast_edges_to_globals(data)
-        global_attr = data.u
+    def forward(self, x_aggr, edge_attr_aggr, global_attr):
+        # x_aggr = cast_nodes_to_globals(data)
+        # edge_attr_aggr = cast_edges_to_globals(data)
+        # global_attr = data.u
         out = torch.cat([x_aggr, edge_attr_aggr, global_attr], dim=1)
-        data.u = self.global_mlp(out)
-        return data
-
-#  model similar to that introduced in pytorch_geometric
-# class NodeModel(torch.nn.Module):
-#     def __init__(self,
-#                  n_node_feats_in,    # number of input node features
-#                  n_nodes_feats_out,  # number of output node features
-#                  n_edge_feats,     # number of input edge features
-#                  n_global_feats,   # number of global (graph) features
-#                  latent_size=128,  # latent size of mlp
-#                  activate_final=False,  # use activate for the last layer or not?
-#                  normalize=True  # batch normalize the output
-#                  ):
-#         super(NodeModel, self).__init__()
-#         self.params = [n_node_feats_in, n_nodes_feats_out, n_edge_feats, n_global_feats]
-#         self.node_mlp_1 = make_mlp_model(n_node_feats_in + n_edge_feats,
-#                                          latent_size,
-#                                          n_node_feats_in + n_edge_feats,
-#                                          activate_final=True,
-#                                          normalize=normalize)
-#         self.node_mlp_2 = make_mlp_model(n_node_feats_in * 2 + n_edge_feats + n_global_feats,
-#                                          latent_size,
-#                                          n_nodes_feats_out,
-#                                          activate_final=activate_final,
-#                                          normalize=normalize)
-#
-#     def forward(self, x, edge_index, edge_attr, global_attr):
-#         row, col = edge_index
-#         receiver = x[row]
-#         out = torch.cat([receiver, edge_attr], dim=1)
-#         out = self.node_mlp_1(out)
-#         out = scatter_mean(out, col, dim=0, dim_size=x.size(0))
-#         global_attr = pad_to_size(global_attr, out.size(0), mode='repeat')
-#         out = torch.cat([x, out, global_attr], dim=1)
-#         return self.node_mlp_2(out)
-
-
-# #  model similar to that introduced in pytorch geometric
-# class GlobalModel(torch.nn.Module):
-#     def __init__(self,
-#                  n_global_in,
-#                  n_global_out,
-#                  n_node_feats,
-#                  latent_size=128,
-#                  activate_final=False
-#                  ):
-#         super(GlobalModel, self).__init__()
-#         self.global_mlp = make_mlp_model(n_global_in + n_node_feats,
-#                                          latent_size,
-#                                          n_global_out,
-#                                          activate_final=activate_final,
-#                                          normalize=False  # batch normalization does not work when batch size = 1;
-#                                                           # https://github.com/pytorch/pytorch/issues/7716
-#                                          )
-#
-#     def forward(self, x, global_attr):
-#         xmean = torch.mean(x, dim=0, keepdim=True)
-#         out = torch.cat([global_attr, xmean], dim=1)
-#         return self.global_mlp(out)
+        return self.global_mlp(out)
 
 
 
