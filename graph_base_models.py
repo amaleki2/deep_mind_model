@@ -40,8 +40,8 @@ def make_mlp_model(n_input, latent_size, n_output, activate_final=False,
     else:
         mlp = [Linear(n_input, latent_size),
                ReLU(),
-               # Linear(latent_size, latent_size),
-               # ReLU(),
+               Linear(latent_size, latent_size),
+               ReLU(),
                # Linear(latent_size, latent_size),
                # ReLU(),
                Linear(latent_size, n_output)]
@@ -64,30 +64,53 @@ def make_mlp_model(n_input, latent_size, n_output, activate_final=False,
 
 def cast_globals_to_nodes(global_attr, batch=None, num_nodes=None):
     if batch is not None:
-        node_indices, counts = torch.unique(batch, return_counts=True)
-        casted_global_attr = [global_attr[idx, :] for idx, count in zip(node_indices, counts) for _ in range(count)]
+        _, counts = torch.unique(batch, return_counts=True)
+        casted_global_attr = torch.cat([torch.repeat_interleave(global_attr[idx:idx+1, :], rep, dim=0)
+                                        for idx, rep in enumerate(counts)], dim=0)
     else:
         assert global_attr.size(0) == 1, "batch numbers should be provided."
         assert num_nodes is not None, "number of nodes should be specified."
-        casted_global_attr = [global_attr] * num_nodes
-    casted_global_attr = torch.cat(casted_global_attr, dim=0)
-    casted_global_attr = casted_global_attr.view(-1, global_attr.size(-1))
+        casted_global_attr = torch.cat([global_attr] * num_nodes, dim=0)
     return casted_global_attr
+
+# def cast_globals_to_nodes(global_attr, batch=None, num_nodes=None):
+#     if batch is not None:
+#         node_indices, counts = torch.unique(batch, return_counts=True)
+#         casted_global_attr = [global_attr[idx, :] for idx, count in zip(node_indices, counts) for _ in range(count)]
+#     else:
+#         assert global_attr.size(0) == 1, "batch numbers should be provided."
+#         assert num_nodes is not None, "number of nodes should be specified."
+#         casted_global_attr = [global_attr] * num_nodes
+#     casted_global_attr = torch.cat(casted_global_attr, dim=0)
+#     casted_global_attr = casted_global_attr.view(-1, global_attr.size(-1))
+#     return casted_global_attr
 
 
 def cast_globals_to_edges(global_attr, edge_index=None, batch=None, num_edges=None):
     if batch is not None:
         assert edge_index is not None, "edge index should be specified"
         edge_counts = get_edge_counts(edge_index, batch)
-        graph_indices = torch.unique(batch)
-        casted_global_attr = [global_attr[idx, :] for idx, count in zip(graph_indices, edge_counts) for _ in range(count)]
+        casted_global_attr = torch.cat([torch.repeat_interleave(global_attr[idx:idx + 1, :], rep, dim=0)
+                                        for idx, rep in enumerate(edge_counts)], dim=0)
     else:
         assert global_attr.size(0) == 1, "batch numbers should be provided."
         assert num_edges is not None, "number of edges should be specified"
-        casted_global_attr = [global_attr] * num_edges
-    casted_global_attr = torch.cat(casted_global_attr, dim=0)
-    casted_global_attr = casted_global_attr.view(-1, global_attr.size(-1))
+        casted_global_attr = torch.cat([global_attr] * num_edges, dim=0)
     return casted_global_attr
+
+# def cast_globals_to_edges(global_attr, edge_index=None, batch=None, num_edges=None):
+#     if batch is not None:
+#         assert edge_index is not None, "edge index should be specified"
+#         edge_counts = get_edge_counts(edge_index, batch)
+#         graph_indices = torch.unique(batch)
+#         casted_global_attr = [global_attr[idx, :] for idx, count in zip(graph_indices, edge_counts) for _ in range(count)]
+#     else:
+#         assert global_attr.size(0) == 1, "batch numbers should be provided."
+#         assert num_edges is not None, "number of edges should be specified"
+#         casted_global_attr = [global_attr] * num_edges
+#     casted_global_attr = torch.cat(casted_global_attr, dim=0)
+#     casted_global_attr = casted_global_attr.view(-1, global_attr.size(-1))
+#     return casted_global_attr
 
 
 def cast_edges_to_globals(edge_attr, edge_index=None, batch=None, num_edges=None, num_globals=None):

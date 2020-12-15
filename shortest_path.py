@@ -388,7 +388,6 @@ def compute_accuracy(x_edge_attr, x_node_attr, y_edge_attr, y_node_attr, use_edg
 def train_batched(model, data_generator, train_data_params, test_data_params, loss_func,
                   accuracy_func=None, use_cpu=False, lr_0=0.001, n_epoch=101,
                   print_every=10, step_size=50, gamma=0.5):
-    t1 = time.time()
     if use_cpu:
         device = torch.device('cpu')
     else:
@@ -404,20 +403,15 @@ def train_batched(model, data_generator, train_data_params, test_data_params, lo
     data_saver_dict = {"train": {"loss": [], "acc1": [], "acc2": []},
                        "test":  {"loss": [], "acc1": [], "acc2": []}}
 
-    t2 = time.time()
-    print("preparation before main for loop Dt1 =", (t2 - t1))
     for epoch in range(n_epoch):
         epoch_metrics = None
         x_data_loader, y_data_loader = data_generator(*train_data_params)
         for x_in, y in zip(x_data_loader, y_data_loader):
-            t3 = time.time()
             x_in.to(device=device)
             y.to(device=device)
             model.train()
             optimizer.zero_grad()
-            t4 = time.time()
             output = model(x_in)
-            t5 = time.time()
             if not hasattr(model, 'full_output') or model.full_output is False:
                 x_out = output
                 loss = loss_func(x_out[0], x_out[1], y.edge_attr, y.x, x_in.edge_index, x_in.batch)
@@ -425,7 +419,7 @@ def train_batched(model, data_generator, train_data_params, test_data_params, lo
                 loss = [loss_func(x_out[0], x_out[1], y.edge_attr, y.x, x_in.edge_index, x_in.batch) for x_out in output]
                 loss = sum(loss) / len(loss)
                 x_out = output[-1]
-            t6 = time.time()
+
             if accuracy_func is not None:
                 acc = accuracy_func(x_out[0], x_out[1], y.edge_attr, y.x, x_in.edge_index, x_in.batch)
                 epoch_metric = torch.cat((loss.view(1), acc))
@@ -436,16 +430,10 @@ def train_batched(model, data_generator, train_data_params, test_data_params, lo
             else:
                 epoch_metrics += epoch_metric
 
-            t7 = time.time()
             loss.backward()
-
-            t8 = time.time()
             optimizer.step()
-
-            t9 = time.time()
         epoch_metrics = epoch_metrics / len(x_data_loader)
         scheduler.step()
-        t10 = time.time()
         if epoch % print_every == 0:
             epoch_metrics_test = torch.zeros_like(epoch_metrics)
             x_test_data_loader, y_test_data_loader = data_generator(*test_data_params)
@@ -486,8 +474,6 @@ def train_batched(model, data_generator, train_data_params, test_data_params, lo
             with open("data_saver.pkl", "wb") as fid:
                 pickle.dump(data_saver_dict, fid, protocol=pickle.HIGHEST_PROTOCOL)
 
-        t11 = time.time()
-        #print(t3-t2, t4-t3, t5-t4, t6-t5, t7-t6, t8-t7, t9-t8, t10-t9, t11-t10)
 
 if __name__ == "__main__":
     seed = 1
@@ -507,7 +493,7 @@ if __name__ == "__main__":
     model = EncodeProcessDecode(n_edge_feat_in=n_edge_feat_in, n_edge_feat_out=n_edge_feat_out,
                                 n_node_feat_in=n_node_feat_in, n_node_feat_out=n_node_feat_out,
                                 n_global_feat_in=n_global_feat, n_global_feat_out=n_global_feat,
-                                mlp_latent_size=16, num_processing_steps=10, full_output=True,
+                                mlp_latent_size=64, num_processing_steps=10, full_output=True,
                                 encoder=GraphNetworkIndependentBlock, decoder=GraphNetworkIndependentBlock,
                                 output_transformer=GraphNetworkIndependentBlock
                                 )
@@ -518,3 +504,58 @@ if __name__ == "__main__":
                   loss_func=create_loss_batched,
                   accuracy_func=compute_accuracy_batched,
                   lr_0=1e-3, n_epoch=5000, print_every=25, step_size=5000, gamma=0.25)
+
+import numpy as np
+import matplotlib.pyplot as plt
+tf_file_name = "tf_data_saver_1.pkl"
+torch_file_name = "data_saver_1.pkl"
+with open(tf_file_name, "rb") as fid1:
+    tf_results = pickle.load(fid1)
+
+with open(torch_file_name, "rb") as fid2:
+    torch_results = pickle.load(fid2)
+
+tf_train_results = tf_results["train"]
+tf_test_results = tf_results["test"]
+torch_train_results = torch_results["train"]
+torch_test_results = torch_results["test"]
+
+num_epoch = np.linspace(0, 4225, 170)
+plt.figure(figsize=(15, 10))
+plt.subplot(2, 3, 1)
+plt.plot(num_epoch, tf_train_results['loss'][:170], linewidth=1, color='k')
+plt.plot(num_epoch, torch_train_results['loss'], linewidth=1, color='r')
+plt.yscale('log')
+plt.ylabel('train loss')
+plt.xlabel('epochs')
+
+plt.subplot(2, 3, 4)
+plt.plot(num_epoch, tf_test_results['loss'][:170], linewidth=1, color='k', linestyle='--')
+plt.plot(num_epoch, torch_test_results['loss'], linewidth=1, color='r', linestyle='--')
+plt.yscale('log')
+plt.ylabel('test loss')
+plt.xlabel('epochs')
+
+plt.subplot(2, 3, 2)
+plt.plot(num_epoch, tf_train_results['acc1'][:170], linewidth=1, color='k')
+plt.plot(num_epoch, torch_train_results['acc1'], linewidth=1, color='r')
+plt.ylabel('train acc1')
+plt.xlabel('epochs')
+
+plt.subplot(2, 3, 5)
+plt.plot(num_epoch, tf_test_results['acc1'][:170], linewidth=1, color='k', linestyle='--')
+plt.plot(num_epoch, torch_test_results['acc1'], linewidth=1, color='r', linestyle='--')
+plt.ylabel('test acc1')
+plt.xlabel('epochs')
+
+plt.subplot(2, 3, 3)
+plt.plot(num_epoch, tf_train_results['acc2'][:170], linewidth=1, color='k')
+plt.plot(num_epoch, torch_train_results['acc2'], linewidth=1, color='r')
+plt.ylabel('train acc2')
+plt.xlabel('epochs')
+
+plt.subplot(2, 3, 6)
+plt.plot(num_epoch, torch_test_results['acc2'], linewidth=1, color='r', linestyle='--')
+plt.plot(num_epoch, tf_test_results['acc2'][:170], linewidth=1, color='k', linestyle='--')
+plt.ylabel('test acc2')
+plt.xlabel('epochs')

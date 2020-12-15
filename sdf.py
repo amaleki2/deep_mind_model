@@ -221,7 +221,7 @@ if __name__ == "__main__":
     data_folder = sys.argv[1]
     edge_weight = True
 
-    n_objects, batch_size, n_epoch = 30, 30, 150
+    n_objects, batch_size, n_epoch = 30, 12, 150
     lr_0, step_size, gamma, radius = 0.001, 200, 0.6, 0.1
 
     train_data, test_data = get_sdf_data_loader(n_objects, data_folder, batch_size, edge_weight=edge_weight)
