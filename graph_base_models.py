@@ -79,8 +79,8 @@ def cast_globals_to_edges(global_attr, edge_index=None, batch=None, num_edges=No
     if batch is not None:
         assert edge_index is not None, "edge index should be specified"
         edge_counts = get_edge_counts(edge_index, batch)
-        node_indices = torch.unique(batch)
-        casted_global_attr = [global_attr[idx, :] for idx, count in zip(node_indices, edge_counts) for _ in range(count)]
+        graph_indices = torch.unique(batch)
+        casted_global_attr = [global_attr[idx, :] for idx, count in zip(graph_indices, edge_counts) for _ in range(count)]
     else:
         assert global_attr.size(0) == 1, "batch numbers should be provided."
         assert num_edges is not None, "number of edges should be specified"
