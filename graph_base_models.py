@@ -33,17 +33,21 @@ def get_edge_counts(edge_index, batch):
     return torch.bincount(batch[edge_index[0, :]])
 
 
-def make_mlp_model(n_input, latent_size, n_output, activate_final=False, normalize=True, initializer=False):
-    mlp = [Linear(n_input, latent_size),
-           ReLU(),
-           Linear(latent_size, latent_size),
-           ReLU(),
-           Linear(latent_size, latent_size),
-           ReLU(),
-           Linear(latent_size, n_output)]
+def make_mlp_model(n_input, latent_size, n_output, activate_final=False,
+                   normalize=True, initializer=False):
+    if latent_size is None:
+        mlp = [Linear(n_input, n_output)]
+    else:
+        mlp = [Linear(n_input, latent_size),
+               ReLU(),
+               # Linear(latent_size, latent_size),
+               # ReLU(),
+               # Linear(latent_size, latent_size),
+               # ReLU(),
+               Linear(latent_size, n_output)]
     if activate_final:
         mlp.append(ReLU())
-    if normalize:
+    if normalize and latent_size is not None:
         # mlp.append(BatchNorm1d(n_output))
         mlp.append(LayerNorm(n_output))
     mlp = Sequential(*mlp)
@@ -51,9 +55,9 @@ def make_mlp_model(n_input, latent_size, n_output, activate_final=False, normali
     # this is only for debugging
     if initializer:
         for layer in mlp:
-            if hasattr(layer, 'weight'):
-                layer.weight.data.fill_(0.0)
-                layer.bias.data.fill_(0.)
+            if layer._get_name() == "Linear":
+                layer.weight.data.fill_(0.01)
+                layer.bias.data.fill_(0.01)
 
     return mlp
 
@@ -159,7 +163,8 @@ class IndependentGlobalModel(torch.nn.Module):
                  n_global_in,
                  n_global_out,
                  latent_size=128,
-                 activate_final=True
+                 activate_final=True,
+                 normalize=True
                  ):
 
         super(IndependentGlobalModel, self).__init__()
@@ -168,8 +173,9 @@ class IndependentGlobalModel(torch.nn.Module):
                                          latent_size,
                                          n_global_out,
                                          activate_final=activate_final,
-                                         normalize=False  # batch normalization does not work when batch size = 1;
-                                                          # https://github.com/pytorch/pytorch/issues/7716
+                                         normalize=normalize  # careful: batch normalization does not work when
+                                                              # batch size = 1;
+                                                              # https://github.com/pytorch/pytorch/issues/7716
                                          )
 
     def forward(self, global_attr):
@@ -256,7 +262,8 @@ class GlobalModel(torch.nn.Module):
                  n_node_feats,
                  n_edge_feats,
                  latent_size=128,
-                 activate_final=True
+                 activate_final=True,
+                 normalize=True,
                  ):
 
         super(GlobalModel, self).__init__()
@@ -265,8 +272,9 @@ class GlobalModel(torch.nn.Module):
                                          latent_size,
                                          n_global_out,
                                          activate_final=activate_final,
-                                         normalize=False  # batch normalization does not work when batch size = 1;
-                                                          # https://github.com/pytorch/pytorch/issues/7716
+                                         normalize=normalize  # careful: batch normalization does not work when
+                                                              # batch size = 1;
+                                                              # https://github.com/pytorch/pytorch/issues/7716
                                          )
 
     def forward(self, x_aggr, edge_attr_aggr, global_attr):

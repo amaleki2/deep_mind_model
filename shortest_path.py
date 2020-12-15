@@ -3,8 +3,9 @@ import collections
 import numpy as np
 import networkx as nx
 from scipy import spatial
-
+import pickle
 import torch
+import time
 from torch.nn import CrossEntropyLoss
 from torch_geometric.data import Data, DataLoader
 from graph_networks import EncodeProcessDecode, GraphNetworkIndependentBlock
@@ -145,6 +146,23 @@ def add_shortest_path(rand, graph, min_length=1):
 
     return digraph
 
+def argmax_keepdims(x, axis=None):
+    """
+    Returns the indices of the maximum values along an axis.
+
+    The axis which is reduced is left in the result as dimension with size one.
+    The result will broadcast correctly against the input array.
+
+    Original numpy.argmax() implementation does not currently support the keepdims parameter.
+    See https://github.com/numpy/numpy/issues/8710 for further information.
+    """
+    if axis is None:
+        return np.argmax(x)
+
+    output_shape = list(x.shape)
+    output_shape[axis] = 1
+    return np.argmax(x, axis=axis).reshape(output_shape)
+
 
 def graph_to_input_target(graph):
     """Returns 2 graphs with input and target feature vectors for training.
@@ -220,7 +238,7 @@ def generate_networkx_graphs(rand, num_examples, num_nodes_min_max, theta):
     return input_graphs, target_graphs, graphs
 
 
-def get_data_from_networkx(graph_nx, is_target=False):
+def get_data_from_networkx(graph_nx):
     """Generate torch_geometric data from graphs for training and testing.
 
     Args:
@@ -245,18 +263,20 @@ def get_data_from_networkx(graph_nx, is_target=False):
     edge_data = np.array(edge_data)
     global_data = graph_nx.graph["features"]
     global_data = np.atleast_2d(global_data)
-    if is_target:
-        node_data = np.argmax(node_data, axis=1)
-        edge_data = np.argmax(edge_data, axis=1)
-        data = Data(x=torch.from_numpy(node_data).type(torch.long),
-                    edge_index=torch.from_numpy(edge_index).type(torch.long),
-                    edge_attr=torch.from_numpy(edge_data).type(torch.long),
-                    u=torch.from_numpy(global_data).type(torch.float32))
-    else:
-        data = Data(x=torch.from_numpy(node_data).type(torch.float32),
-                    edge_index=torch.from_numpy(edge_index).type(torch.long),
-                    edge_attr=torch.from_numpy(edge_data).type(torch.float32),
-                    u=torch.from_numpy(global_data).type(torch.float32))
+    # if is_target:
+    #     node_data = argmax_keepdims(node_data, axis=1)
+    #     node_data = np.concatenate((node_data, 1-node_data), axis=1)
+    #     edge_data = argmax_keepdims(edge_data, axis=1)
+    #     edge_data = np.concatenate((edge_data, 1-edge_data), axis=1)
+    #     data = Data(x=torch.from_numpy(node_data).type(torch.long),
+    #                 edge_index=torch.from_numpy(edge_index).type(torch.long),
+    #                 edge_attr=torch.from_numpy(edge_data).type(torch.long),
+    #                 u=torch.from_numpy(global_data).type(torch.float32))
+    # else:
+    data = Data(x=torch.from_numpy(node_data).type(torch.float32),
+                edge_index=torch.from_numpy(edge_index).type(torch.long),
+                edge_attr=torch.from_numpy(edge_data).type(torch.float32),
+                u=torch.from_numpy(global_data).type(torch.float32))
     return data
 
 
@@ -275,60 +295,88 @@ def setup_data_loader(rand, num_examples, num_nodes_min_max, theta, batch_size=N
     # batch_size = num_examples if batch_size is None else batch_size
     batch_size = num_examples if batch_size is None else batch_size
     input_graphs, target_graphs, _ = generate_networkx_graphs(rand, num_examples, num_nodes_min_max, theta)
-    X = [get_data_from_networkx(input_graph, is_target=False) for input_graph in input_graphs]
-    Y = [get_data_from_networkx(target_graph, is_target=True) for target_graph in target_graphs]
+    X = [get_data_from_networkx(input_graph) for input_graph in input_graphs]
+    Y = [get_data_from_networkx(target_graph) for target_graph in target_graphs]
+    x_data_loader = DataLoader(X, batch_size=batch_size)
+    y_data_loader = DataLoader(Y, batch_size=batch_size)
+    return x_data_loader, y_data_loader
+
+
+def setup_data_loader_from_saved_networks(num_graphs, batch_size=None):
+    """Generate torch_geometric data from saved pickle files of network.
+       implemented for comparison between tensorflow and pytorch.
+
+        Args:
+            rand: random seed to generate random graphs
+            num_examples: number of examples for train and test
+            num_nodes_min_max: a tuple of min and max number of nodes
+            theta: parameter to control graph generation.
+            batch_size: batch size
+        Returns:
+            x_data_loader, y_data_loader: objects of type torch_geometric.data.DataLoader
+        """
+    batch_size = num_graphs if batch_size is None else batch_size
+
+    input_graphs = []
+    target_graphs = []
+    for i in range(num_graphs):
+        input_graphs.append(nx.read_gpickle("test_graphs/input_graph_%d" % i))
+        target_graphs.append(nx.read_gpickle("test_graphs/target_graph_%d" % i))
+
+    X = [get_data_from_networkx(input_graph) for input_graph in input_graphs]
+    Y = [get_data_from_networkx(target_graph) for target_graph in target_graphs]
     x_data_loader = DataLoader(X, batch_size=batch_size)
     y_data_loader = DataLoader(Y, batch_size=batch_size)
     return x_data_loader, y_data_loader
 
 
 ce_loss = CrossEntropyLoss()
-def create_loss_ops_GN(y, x):
+def create_loss_batched(x_edge_attr, x_node_attr, y_edge_attr, y_node_attr, edge_index, batch, use_edges=True):
     """
     loss function for shortest path example
     :param y: target graph
     :param x: predicted graph
     :return: a list of loss values
     """
-    loss_nodes = ce_loss(x.x, y.x)
-    loss_edges = ce_loss(x.edge_attr, y.edge_attr)
-    loss = loss_nodes + loss_edges
+    y_node_attr_reduce_1d = torch.argmax(y_node_attr, dim=1)
+    loss = ce_loss(x_node_attr, y_node_attr_reduce_1d)
+    if use_edges:
+        y_edge_attr_reduce_1d = torch.argmax(y_edge_attr, dim=1)
+        loss += ce_loss(x_edge_attr, y_edge_attr_reduce_1d)
     return loss
 
 
-def compute_accuracy_batched(y, x):
+def compute_accuracy_batched(x_edge_attr, x_node_attr, y_edge_attr, y_node_attr, edge_index, batch, use_edges=False):
     """
     compute accuracy for the shortest path problem when graphs are batched.
-    :param y: target graph
-    :param x: predicted graph
-    :return:
+    :y: target graph
+    :x: predicted graph
+    :return: batch accur
     """
-    node_counts = torch.unique(x.batch, return_counts=True)[1]
-    edge_counts = get_edge_counts(x)
-    # assert torch.all(node_counts == torch.unique(y.batch, return_counts=True)[1])
-    # assert torch.all(get_edge_counts(y) == edge_counts)
+    node_counts = torch.unique(batch, return_counts=True)[1]
+    edge_counts = get_edge_counts(edge_index, batch)
     node_indices = torch.cumsum(node_counts, dim=0)
     edge_indices = torch.cumsum(edge_counts, dim=0)
     node_istart = 0
     edge_istart = 0
     acc_batch = 0
     for node_iend, edge_iend in zip(node_indices, edge_indices):
-        x_edge_attr = x.edge_attr[edge_istart:edge_iend]
-        x_node_attr = x.x[node_istart:node_iend]
-        y_edge_attr = y.edge_attr[edge_istart:edge_iend]
-        y_node_attr = y.x[node_istart:node_iend]
-        acc = compute_accuracy(x_edge_attr, x_node_attr, y_edge_attr, y_node_attr)
+        x_edge_attr_b = x_edge_attr[edge_istart:edge_iend]
+        x_node_attr_b = x_node_attr[node_istart:node_iend]
+        y_edge_attr_b = y_edge_attr[edge_istart:edge_iend]
+        y_node_attr_b = y_node_attr[node_istart:node_iend]
+        acc = compute_accuracy(x_edge_attr_b, x_node_attr_b, y_edge_attr_b, y_node_attr_b, use_edges=use_edges)
         acc_batch += acc
         node_istart = node_iend
         edge_istart = edge_iend
-    acc_batch /= x.num_graphs
+    acc_batch /= len(node_indices)
     return acc_batch
 
 
 def compute_accuracy(x_edge_attr, x_node_attr, y_edge_attr, y_node_attr, use_edges=False):
-    c1 = torch.argmax(x_node_attr, dim=1) == y_node_attr
+    c1 = torch.argmax(x_node_attr, dim=1) == torch.argmax(y_node_attr, dim=1)
     if use_edges:
-        c2 = torch.argmax(x_edge_attr, dim=1) == y_edge_attr
+        c2 = torch.argmax(x_edge_attr, dim=1) == torch.argmax(y_edge_attr, dim=1)
         c = torch.cat([c1, c2])
     else:
         c = c1
@@ -340,6 +388,7 @@ def compute_accuracy(x_edge_attr, x_node_attr, y_edge_attr, y_node_attr, use_edg
 def train_batched(model, data_generator, train_data_params, test_data_params, loss_func,
                   accuracy_func=None, use_cpu=False, lr_0=0.001, n_epoch=101,
                   print_every=10, step_size=50, gamma=0.5):
+    t1 = time.time()
     if use_cpu:
         device = torch.device('cpu')
     else:
@@ -352,39 +401,51 @@ def train_batched(model, data_generator, train_data_params, test_data_params, lo
     optimizer = torch.optim.Adam(model.parameters(), lr=lr_0)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
 
+    data_saver_dict = {"train": {"loss": [], "acc1": [], "acc2": []},
+                       "test":  {"loss": [], "acc1": [], "acc2": []}}
+
+    t2 = time.time()
+    print("preparation before main for loop Dt1 =", (t2 - t1))
     for epoch in range(n_epoch):
         epoch_metrics = None
         x_data_loader, y_data_loader = data_generator(*train_data_params)
         for x_in, y in zip(x_data_loader, y_data_loader):
+            t3 = time.time()
             x_in.to(device=device)
             y.to(device=device)
             model.train()
             optimizer.zero_grad()
+            t4 = time.time()
             output = model(x_in)
-
+            t5 = time.time()
             if not hasattr(model, 'full_output') or model.full_output is False:
                 x_out = output
-                loss = loss_func(y, x_out)
+                loss = loss_func(x_out[0], x_out[1], y.edge_attr, y.x, x_in.edge_index, x_in.batch)
             else:
-                loss = [loss_func(y, x_out) for x_out in output]
+                loss = [loss_func(x_out[0], x_out[1], y.edge_attr, y.x, x_in.edge_index, x_in.batch) for x_out in output]
                 loss = sum(loss) / len(loss)
                 x_out = output[-1]
-
+            t6 = time.time()
             if accuracy_func is not None:
-                acc = accuracy_func(y, x_out)
+                acc = accuracy_func(x_out[0], x_out[1], y.edge_attr, y.x, x_in.edge_index, x_in.batch)
                 epoch_metric = torch.cat((loss.view(1), acc))
             else:
                 epoch_metric = loss
-
             if epoch_metrics is None:
                 epoch_metrics = epoch_metric
             else:
                 epoch_metrics += epoch_metric
+
+            t7 = time.time()
             loss.backward()
+
+            t8 = time.time()
             optimizer.step()
+
+            t9 = time.time()
         epoch_metrics = epoch_metrics / len(x_data_loader)
         scheduler.step()
-
+        t10 = time.time()
         if epoch % print_every == 0:
             epoch_metrics_test = torch.zeros_like(epoch_metrics)
             x_test_data_loader, y_test_data_loader = data_generator(*test_data_params)
@@ -398,9 +459,9 @@ def train_batched(model, data_generator, train_data_params, test_data_params, lo
                     x_out_test = output_test[-1]
                 else:
                     x_out_test = output_test
-                loss_test = loss_func(y_test, x_out_test)
+                loss_test = loss_func(x_out_test[0], x_out_test[1], y_test.edge_attr, y_test.x, x_in_test.edge_index, x_in_test.batch)
                 if accuracy_func is not None:
-                    acc_test = accuracy_func(y_test, x_out_test)
+                    acc_test = accuracy_func(x_out_test[0], x_out_test[1], y_test.edge_attr, y_test.x, x_in_test.edge_index, x_in_test.batch)
                     epoch_metric_test = torch.cat((loss_test.view(1), acc_test))
                 else:
                     epoch_metric_test = loss_test
@@ -415,7 +476,18 @@ def train_batched(model, data_generator, train_data_params, test_data_params, lo
                 epoch_metrics_test_print_ready = [round(x, 3) for x in epoch_metrics_test.tolist()]
             print("epoch %d: lr: %0.5e, training metrics:" % (epoch, optimizer.param_groups[0]['lr']),
                   epoch_metric_print_ready, ", test metrics:", epoch_metrics_test_print_ready)
+            data_saver_dict["train"]["loss"].append(epoch_metric_print_ready[0])
+            data_saver_dict["train"]["acc1"].append(epoch_metric_print_ready[1])
+            data_saver_dict["train"]["acc2"].append(epoch_metric_print_ready[2])
+            data_saver_dict["test"]["loss"].append(epoch_metrics_test_print_ready[0])
+            data_saver_dict["test"]["acc1"].append(epoch_metrics_test_print_ready[1])
+            data_saver_dict["test"]["acc2"].append(epoch_metrics_test_print_ready[2])
 
+            with open("data_saver.pkl", "wb") as fid:
+                pickle.dump(data_saver_dict, fid, protocol=pickle.HIGHEST_PROTOCOL)
+
+        t11 = time.time()
+        #print(t3-t2, t4-t3, t5-t4, t6-t5, t7-t6, t8-t7, t9-t8, t10-t9, t11-t10)
 
 if __name__ == "__main__":
     seed = 1
@@ -424,11 +496,9 @@ if __name__ == "__main__":
 
     num_training_examples = 32
     num_training_nodes_min_max = (8, 17)
-    x_data_loader, y_data_loader = setup_data_loader(rand, num_training_examples, num_training_nodes_min_max, theta)
 
     num_test_examples = 100
     num_test_nodes_min_max = (16, 33)
-    x_data_test_loader, y_data_test_loader = setup_data_loader(rand, num_test_examples, num_test_nodes_min_max, theta)
 
     n_edge_feat_in, n_edge_feat_out = 1, 2
     n_node_feat_in, n_node_feat_out = 5, 2
@@ -437,7 +507,7 @@ if __name__ == "__main__":
     model = EncodeProcessDecode(n_edge_feat_in=n_edge_feat_in, n_edge_feat_out=n_edge_feat_out,
                                 n_node_feat_in=n_node_feat_in, n_node_feat_out=n_node_feat_out,
                                 n_global_feat_in=n_global_feat, n_global_feat_out=n_global_feat,
-                                mlp_latent_size=64, num_processing_steps=10, full_output=True,
+                                mlp_latent_size=16, num_processing_steps=10, full_output=True,
                                 encoder=GraphNetworkIndependentBlock, decoder=GraphNetworkIndependentBlock,
                                 output_transformer=GraphNetworkIndependentBlock
                                 )
@@ -445,6 +515,6 @@ if __name__ == "__main__":
     train_data_generator_params = (rand, num_training_examples, num_training_nodes_min_max, theta)
     test_data_generator_params = (rand, num_test_examples, num_test_nodes_min_max, theta)
     train_batched(model, setup_data_loader, train_data_generator_params, test_data_generator_params,
-                  loss_func=create_loss_ops_GN,
-                  #accuracy_func=compute_accuracy_batched,
-                  lr_0=0.001, n_epoch=10000, print_every=200, step_size=5000, gamma=0.25)
+                  loss_func=create_loss_batched,
+                  accuracy_func=compute_accuracy_batched,
+                  lr_0=1e-3, n_epoch=5000, print_every=25, step_size=5000, gamma=0.25)

@@ -35,7 +35,7 @@ class GraphNetworkBlock(torch.nn.Module):
         self.node_model = NodeModel(n_node_feat_in, n_node_feat_out, n_edge_feat_out, n_global_feat_in,
                                     latent_size=latent_size, activate_final=activate_final, normalize=normalize)
         self.global_model = GlobalModel(n_global_feat_in, n_global_feat_out, n_node_feat_out, n_edge_feat_out,
-                                        latent_size=latent_size, activate_final=activate_final)
+                                        latent_size=latent_size, activate_final=activate_final, normalize=normalize)
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -80,7 +80,7 @@ class GraphNetworkIndependentBlock(torch.nn.Module):
         self.node_model = IndependentNodeModel(n_node_feat_in, n_node_feat_out, latent_size=latent_size,
                                                activate_final=activate_final, normalize=normalize)
         self.global_model = IndependentGlobalModel(n_global_feat_in, n_global_feat_out, latent_size=latent_size,
-                                                   activate_final=activate_final)
+                                                   activate_final=activate_final, normalize=normalize)
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -133,7 +133,7 @@ class EncodeProcessDecode(torch.nn.Module):
         self.output_transformer = output_transformer(mlp_latent_size, n_edge_feat_out,
                                                      mlp_latent_size, n_node_feat_out,
                                                      mlp_latent_size, n_global_feat_out,
-                                                     latent_size=mlp_latent_size // 2 + 1,
+                                                     latent_size=None,
                                                      activate_final=False, normalize=False)
 
     def forward(self, data):
@@ -147,7 +147,8 @@ class EncodeProcessDecode(torch.nn.Module):
             global_attr = torch.cat((global_attr0, global_attr), dim=1)
             edge_attr, node_attr, global_attr = self.processor(edge_attr, node_attr, global_attr, edge_index, batch)
             edge_attr_de, node_attr_de, global_attr_de = self.decoder(edge_attr, node_attr, global_attr, edge_index, batch)
-            output_ops.append(self.output_transformer(edge_attr_de, node_attr_de, global_attr_de, edge_index, batch))
+            edge_attr_op, node_attr_op, global_attr_op = self.output_transformer(edge_attr_de, node_attr_de, global_attr_de, edge_index, batch)
+            output_ops.append((edge_attr_op, node_attr_op, global_attr_op))
 
         if self.full_output:
             return output_ops
