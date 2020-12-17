@@ -42,13 +42,11 @@ def make_mlp_model(n_input, latent_size, n_output, activate_final=False,
                ReLU(),
                Linear(latent_size, latent_size),
                ReLU(),
-               # Linear(latent_size, latent_size),
-               # ReLU(),
                Linear(latent_size, n_output)]
+
     if activate_final:
         mlp.append(ReLU())
     if normalize and latent_size is not None:
-        # mlp.append(BatchNorm1d(n_output))
         mlp.append(LayerNorm(n_output))
     mlp = Sequential(*mlp)
 
@@ -90,7 +88,7 @@ def cast_globals_to_edges(global_attr, edge_index=None, batch=None, num_edges=No
     if batch is not None:
         assert edge_index is not None, "edge index should be specified"
         edge_counts = get_edge_counts(edge_index, batch)
-        casted_global_attr = torch.cat([torch.repeat_interleave(global_attr[idx:idx + 1, :], rep, dim=0)
+        casted_global_attr = torch.cat([torch.repeat_interleave(global_attr[idx:idx+1, :], rep, dim=0)
                                         for idx, rep in enumerate(edge_counts)], dim=0)
     else:
         assert global_attr.size(0) == 1, "batch numbers should be provided."
@@ -120,7 +118,8 @@ def cast_edges_to_globals(edge_attr, edge_index=None, batch=None, num_edges=None
         node_indices = torch.unique(batch)
         edge_counts = get_edge_counts(edge_index, batch)
         assert sum(edge_counts) == num_edges
-        indices = [idx.view(1, 1) for idx, count in zip(node_indices, edge_counts) for _ in range(count)]
+        # indices = [idx.view(1, 1) for idx, count in zip(node_indices, edge_counts) for _ in range(count)]
+        indices = [torch.repeat_interleave(idx, count) for idx, count in zip(node_indices, edge_counts)]
         indices = torch.cat(indices)
         edge_attr_aggr = scatter_sum(edge_attr, index=indices, dim=0, dim_size=num_globals)
     return edge_attr_aggr

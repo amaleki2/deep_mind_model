@@ -8,7 +8,7 @@ import torch
 import time
 from torch.nn import CrossEntropyLoss
 from torch_geometric.data import Data, DataLoader
-from graph_networks import EncodeProcessDecode, GraphNetworkIndependentBlock
+from graph_networks import EncodeProcessDecode, GraphNetworkIndependentBlock, EncodeProcessDecodeNEW
 from graph_base_models import get_edge_counts
 
 DISTANCE_WEIGHT_NAME = "distance"  # The name for the distance edge attribute.
@@ -490,7 +490,7 @@ if __name__ == "__main__":
     n_node_feat_in, n_node_feat_out = 5, 2
     n_global_feat = 1
 
-    model = EncodeProcessDecode(n_edge_feat_in=n_edge_feat_in, n_edge_feat_out=n_edge_feat_out,
+    model = EncodeProcessDecodeNEW(n_edge_feat_in=n_edge_feat_in, n_edge_feat_out=n_edge_feat_out,
                                 n_node_feat_in=n_node_feat_in, n_node_feat_out=n_node_feat_out,
                                 n_global_feat_in=n_global_feat, n_global_feat_out=n_global_feat,
                                 mlp_latent_size=64, num_processing_steps=10, full_output=True,
