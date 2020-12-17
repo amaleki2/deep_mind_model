@@ -164,7 +164,11 @@ def plot_sdf_results(model, data_loader, ndata=5, levels=None, border=None, save
             if i > ndata:
                 break
             data = data.to(device=device)
-            x_pred, _, _ = model(data.x, data.edge_index, data.edge_attr, data.u)
+            output = model(data)
+            if hasattr(model, 'full_output') or model.full_output is True:
+                output = output[-1]
+            x_pred = output[1]  # node features
+
             cells = data.face.numpy()
             points = data.x.numpy()
             points[:, 2] = 0.
