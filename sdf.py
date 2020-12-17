@@ -16,7 +16,7 @@ def find_best_gpu():
         os.system('nvidia-smi -q -d Memory |grep -A4 GPU|grep Free >tmp')
         memory_available = [int(x.split()[2]) for x in open('tmp', 'r').readlines()]
         gpu_id = np.argmax(memory_available).item()
-        print("best gpu is %d with %0.1f Gb available space" %(gpu_id, memory_available[gpu_id]/1000))
+        print("best gpu is %d with %0.1f Gb available space" % (gpu_id, memory_available[gpu_id] / 1000))
         return gpu_id
 
 
@@ -25,21 +25,22 @@ def compute_edge_features(x, edge_index, mode="full"):
     if mode == "full":
         for i, (e1, e2) in enumerate(edge_index.T):
             edge_attr = x[e1, :] - x[e2, :]
-            edge_attr_sign = np.sign(edge_attr[:2])  # similar to MeshGraphNet paper.
+            edge_attr_sign = np.abs(edge_attr[:2])  # similar to MeshGraphNet paper.
             edge_attr = np.concatenate((edge_attr, edge_attr_sign))
             edge_attrs.append(edge_attr)
     else:
-        raise(NotImplementedError("mode %s is not supported for edge features" % mode))
+        raise (NotImplementedError("mode %s is not supported for edge features" % mode))
     edge_attrs = np.array(edge_attrs)
     return edge_attrs
+
 
 def get_sdf_data_loader(n_objects, data_folder, batch_size, eval_frac=0.2,
                         reversed_edge_already_included=False, edge_weight=False,
                         global_features=True):
     print("preparing sdf data loader")
     random_idx = np.random.permutation(n_objects)
-    train_idx  = random_idx[:int((1 - eval_frac) * n_objects)]
-    test_idx   = random_idx[int((1 - eval_frac) * n_objects):]
+    train_idx = random_idx[:int((1 - eval_frac) * n_objects)]
+    test_idx = random_idx[int((1 - eval_frac) * n_objects):]
 
     train_graph_data_list = []
     test_graph_data_list = []
@@ -51,11 +52,13 @@ def get_sdf_data_loader(n_objects, data_folder, batch_size, eval_frac=0.2,
             if np.ndim(x) == 2:
                 x[:, 2] = (x[:, 2] < 0).astype(float)
                 y = graph_nodes.copy()[:, 2]
+                y = y / np.sqrt(8)
                 y = y.reshape(-1, 1)
             else:  # np.ndim(x) == 3
                 x[:, :, 2] = (x[:, :, 2] < 0).astype(float)
                 x = x.reshape(x.shape[0], -1)
                 y = graph_nodes.copy()[:, :, 2]
+                y = y / np.sqrt(8)
                 y = np.mean(y, axis=-1, keepdims=True)
 
             graph_cells = np.load(data_folder + "graph_cells%d.npy" % i).astype(int)
@@ -66,14 +69,6 @@ def get_sdf_data_loader(n_objects, data_folder, batch_size, eval_frac=0.2,
             graph_edges = graph_edges.T
             n_edges = graph_edges.shape[1]
             if edge_weight:
-                # graph_edge_weights = np.load(data_folder + "graph_weights%d.npy" %i).astype(float)
-                # if graph_edge_weights.shape[0] == n_edges:
-                #     pass
-                # elif graph_edge_weights.shape[0] == n_edges // 2:
-                #     graph_edge_weights = np.concatenate([graph_edge_weights, graph_edge_weights])
-                # else:
-                #     raise("edge weight size is wrong.")
-                #graph_edge_weights = graph_edge_weights.reshape(-1, 1)
                 graph_edge_weights = compute_edge_features(x, graph_edges)
             else:
                 graph_edge_weights = np.ones(n_edges)
@@ -142,7 +137,8 @@ def train_sdf(model, train_data, loss_func=None, use_cpu=False, save_name="",
         scheduler.step()
 
         if epoch % print_every == 0:
-            print("epoch %d: training loss:%0.4f" % (epoch, epoch_loss))
+            lr = optimizer.param_groups[0]['lr']
+            print("epoch %d: learning rate=%0.3e, training loss:%0.4f" % (epoch, lr, epoch_loss))
             torch.save(model.state_dict(), "models/model" + save_name + ".pth")
             np.save("models/loss" + save_name + ".npy", epoch_loss_list)
 
@@ -196,7 +192,7 @@ def plot_mesh(mesh, dims=2, node_labels=False, vals=None, with_colorbar=False, l
     nodes_y = mesh.points[:, 1]
     if dims == 2:
         elements_tris = [c for c in mesh.cells if c.type == "triangle"][0].data
-        #plt.figure(figsize=(8, 8))
+        # plt.figure(figsize=(8, 8))
         if vals is None:
             plt.triplot(nodes_x, nodes_y, elements_tris, alpha=0.9, color='r')
         else:
@@ -207,14 +203,14 @@ def plot_mesh(mesh, dims=2, node_labels=False, vals=None, with_colorbar=False, l
                 cn = plt.tricontour(triangulation, vals, levels, colors='w')
                 plt.clabel(cn, fmt='%0.2f', colors='k', fontsize=10)
         if border:
-            plt.hlines(1-border, -1+border, 1-border, 'r')
-            plt.hlines(-1+border, -1+border, 1-border, 'r')
-            plt.vlines(1-border, -1+border, 1-border, 'r')
-            plt.vlines(-1+border, -1+border, 1-border, 'r')
+            plt.hlines(1 - border, -1 + border, 1 - border, 'r')
+            plt.hlines(-1 + border, -1 + border, 1 - border, 'r')
+            plt.vlines(1 - border, -1 + border, 1 - border, 'r')
+            plt.vlines(-1 + border, -1 + border, 1 - border, 'r')
 
     if node_labels:
-            for i, (x, y) in enumerate(zip(nodes_x, nodes_y)):
-                plt.text(x, y, i)
+        for i, (x, y) in enumerate(zip(nodes_x, nodes_y)):
+            plt.text(x, y, i)
 
     if vals is not None:
         return p
