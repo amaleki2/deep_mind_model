@@ -34,11 +34,11 @@ def compute_edge_features(x, edge_index, mode="full"):
     return edge_attrs
 
 
-def get_sdf_data_loader(n_objects, data_folder, batch_size, eval_frac=0.2,
+def get_sdf_data_loader(n_objects, data_folder, batch_size, eval_frac=0.2, i_start=0,
                         reversed_edge_already_included=False, edge_weight=False,
                         global_features=True):
     print("preparing sdf data loader")
-    random_idx = np.random.permutation(n_objects)
+    random_idx = np.random.permutation(range(i_start, n_objects))
     train_idx = random_idx[:int((1 - eval_frac) * n_objects)]
     test_idx = random_idx[int((1 - eval_frac) * n_objects):]
 
@@ -185,6 +185,29 @@ def plot_sdf_results(model, data_loader, ndata=5, levels=None, border=None, save
             plt.show()
 
 
+def plot_mesh_onto_line(mesh, val, x=None, y=None, show=False, linestyle="-"):
+    if not isinstance(mesh.points, np.ndarray):
+        mesh.points = np.array(mesh.points)
+    assert (x is None) ^ (y is None), "one of x or y has to be None"
+    if x is None:
+        x = np.linspace(-1, 1, 50)
+        y = np.ones_like(x) * y
+        plotting_axes = x
+    else:  # y is None:
+        y = np.linspace(-1, 1, 50)
+        x = np.ones_like(y) * x
+        plotting_axes = y
+
+    nodes_x = mesh.points[:, 0]
+    nodes_y = mesh.points[:, 1]
+    elements_tris = [c for c in mesh.cells if c.type == "triangle"][0].data
+    triangulation = tri.Triangulation(nodes_x, nodes_y, elements_tris)
+    interpolator = tri.LinearTriInterpolator(triangulation, val)
+    val_over_line = interpolator(x, y)
+    plt.plot(plotting_axes, val_over_line, linestyle=linestyle)
+    if show: plt.show()
+
+
 def plot_mesh(mesh, dims=2, node_labels=False, vals=None, with_colorbar=False, levels=None, border=None):
     if not isinstance(mesh.points, np.ndarray):
         mesh.points = np.array(mesh.points)
@@ -214,6 +237,39 @@ def plot_mesh(mesh, dims=2, node_labels=False, vals=None, with_colorbar=False, l
 
     if vals is not None:
         return p
+
+
+
+def plot_results_over_line(model, data, lines=(-0.5, 0, 0.5), ndata=5, save_name=""):
+    device = 'cpu'
+    model = model.to(device)
+    model.load_state_dict(torch.load("models/model" + save_name + ".pth", map_location=device))
+    model.eval()
+    with torch.no_grad():
+        for i, d in enumerate(data):
+            if i > ndata:
+                break
+            d = d.to(device=device)
+            pred = model(d)
+            pred = pred.numpy()[:, 0]
+            gt = d.y.numpy()[:, 0]
+
+            cells = d.face.numpy()
+            points = d.x.numpy()
+            points[:, 2] = 0.
+            mesh = meshio.Mesh(points=points, cells=[("triangle", cells.T)])
+
+            plt.figure(figsize=(12, 5))
+            plt.subplot(1, 2, 1)
+            for line in lines:
+                plot_mesh_onto_line(mesh, val=pred, x=line)
+                plot_mesh_onto_line(mesh, val=gt, x=line, linestyle="--")
+
+            plt.subplot(1, 2, 2)
+            for line in lines:
+                plot_mesh_onto_line(mesh, val=pred, y=line)
+                plot_mesh_onto_line(mesh, val=gt, y=line, linestyle="--")
+            plt.show()
 
 
 if __name__ == "__main__":
