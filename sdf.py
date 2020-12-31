@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import matplotlib.tri as tri
 
 from torch_geometric.data import Data, DataLoader
-from graph_networks import EncodeProcessDecode, GraphNetworkIndependentBlock, GraphNetworkBlock
+from graph_networks import EncodeProcessDecodeNEW, GraphNetworkIndependentBlock, GraphNetworkBlock
 
 
 def find_best_gpu():
@@ -21,22 +21,33 @@ def find_best_gpu():
 
 
 def compute_edge_features(x, edge_index, mode="full"):
-    edge_attrs = []
     if mode == "full":
-        for i, (e1, e2) in enumerate(edge_index.T):
-            edge_attr = x[e1, :] - x[e2, :]
-            edge_attr_sign = np.abs(edge_attr[:2])  # similar to MeshGraphNet paper.
-            edge_attr = np.concatenate((edge_attr, edge_attr_sign))
-            edge_attrs.append(edge_attr)
+        e1, e2 = edge_index
+        edge_attrs = x[e1, :] - x[e2, :]
+        edge_attrs = np.concatenate((edge_attrs, np.abs(edge_attrs[:, :2])), axis=1)
     else:
         raise (NotImplementedError("mode %s is not supported for edge features" % mode))
-    edge_attrs = np.array(edge_attrs)
     return edge_attrs
 
 
+
+def add_reversed_edges(edges):
+    edges_reversed = np.flipud(edges)
+    edges = np.concatenate([edges, edges_reversed], axis=1)
+    return edges
+
+
+def add_self_edges(edges):
+    n_nodes = edges.max()
+    self_edges = [list(range(n_nodes))] * 2
+    self_edges = np.array(self_edges)
+    edges = np.concatenate([edges, self_edges], axis=1)
+    return edges
+
+
 def get_sdf_data_loader(n_objects, data_folder, batch_size, eval_frac=0.2, i_start=0,
-                        reversed_edge_already_included=False, edge_weight=False,
-                        global_features=True):
+                        reversed_edge_already_included=False, self_edge_already_included=False,
+                        edge_weight=False, global_features=True):
     print("preparing sdf data loader")
     random_idx = np.random.permutation(range(i_start, n_objects))
     train_idx = random_idx[:int((1 - eval_frac) * n_objects)]
@@ -64,9 +75,12 @@ def get_sdf_data_loader(n_objects, data_folder, batch_size, eval_frac=0.2, i_sta
             graph_cells = np.load(data_folder + "graph_cells%d.npy" % i).astype(int)
             graph_cells = graph_cells.T
             graph_edges = np.load(data_folder + "graph_edges%d.npy" % i).astype(int)
+            graph_edges = graph_edges.T
             if not reversed_edge_already_included:
                 graph_edges = add_reversed_edges(graph_edges)
-            graph_edges = graph_edges.T
+            if not self_edge_already_included:
+                graph_edges = add_self_edges(graph_edges)
+
             n_edges = graph_edges.shape[1]
             if edge_weight:
                 graph_edge_weights = compute_edge_features(x, graph_edges)
@@ -90,12 +104,6 @@ def get_sdf_data_loader(n_objects, data_folder, batch_size, eval_frac=0.2, i_sta
     train_data = DataLoader(train_graph_data_list, batch_size=batch_size)
     test_data = DataLoader(test_graph_data_list, batch_size=batch_size)
     return train_data, test_data
-
-
-def add_reversed_edges(edges):
-    edges_reversed = np.fliplr(edges)
-    edges = np.concatenate([edges, edges_reversed], axis=0)
-    return edges
 
 
 def train_sdf(model, train_data, loss_func=None, use_cpu=False, save_name="",
@@ -239,7 +247,6 @@ def plot_mesh(mesh, dims=2, node_labels=False, vals=None, with_colorbar=False, l
         return p
 
 
-
 def plot_results_over_line(model, data, lines=(-0.5, 0, 0.5), ndata=5, save_name=""):
     device = 'cpu'
     model = model.to(device)
@@ -277,7 +284,7 @@ if __name__ == "__main__":
     data_folder = sys.argv[1]
     edge_weight = True
 
-    n_objects, batch_size, n_epoch = 30, 12, 150
+    n_objects, batch_size, n_epoch = 20, 12, 150
     lr_0, step_size, gamma, radius = 0.001, 200, 0.6, 0.1
 
     train_data, test_data = get_sdf_data_loader(n_objects, data_folder, batch_size, edge_weight=edge_weight)
@@ -286,13 +293,13 @@ if __name__ == "__main__":
     n_node_feat_in, n_node_feat_out = 3, 1
     n_global_feat = 3
 
-    model = EncodeProcessDecode(n_edge_feat_in=n_edge_feat_in, n_edge_feat_out=n_edge_feat_out,
-                                n_node_feat_in=n_node_feat_in, n_node_feat_out=n_node_feat_out,
-                                n_global_feat_in=n_global_feat, n_global_feat_out=n_global_feat,
-                                mlp_latent_size=16, num_processing_steps=10, full_output=True,
-                                encoder=GraphNetworkIndependentBlock, decoder=GraphNetworkIndependentBlock,
-                                processor=GraphNetworkBlock, output_transformer=GraphNetworkIndependentBlock
-                                )
+    model = EncodeProcessDecodeNEW(n_edge_feat_in=n_edge_feat_in, n_edge_feat_out=n_edge_feat_out,
+                                   n_node_feat_in=n_node_feat_in, n_node_feat_out=n_node_feat_out,
+                                   n_global_feat_in=n_global_feat, n_global_feat_out=n_global_feat,
+                                   mlp_latent_size=32, num_processing_steps=10, full_output=True,
+                                   encoder=GraphNetworkIndependentBlock, decoder=GraphNetworkIndependentBlock,
+                                   processor=GraphNetworkBlock, output_transformer=GraphNetworkIndependentBlock
+                                   )
 
     l1_loss = torch.nn.L1Loss()
 
