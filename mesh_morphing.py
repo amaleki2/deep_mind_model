@@ -3,9 +3,9 @@ import meshio
 import numpy as np
 import matplotlib.pyplot as plt
 from sdf import find_best_gpu, plot_mesh
-from pytorch3d.loss import chamfer_distance
 from torch_geometric.data import Data, DataLoader
 from torch_geometric.nn import knn
+from torch_scatter import scatter_sum
 from graph_networks import EncodeProcessDecode, GraphNetworkBlock, GraphNetworkIndependentBlock, EncodeProcessDecodeNEW
 
 
@@ -15,15 +15,34 @@ def add_reversed_edges(edges):
     return edges
 
 
-def cells_to_edges(cells):
-    edge_pairs = []
-    for cell in cells:
-        for p1, p2 in [(0, 1), (1, 2), (0, 2)]:
-            edge = sorted([cell[p1], cell[p2]])
-            if edge not in edge_pairs:
-                edge_pairs.append(edge)
+def add_self_edges(edges):
+    n_nodes = edges.max()
+    self_edges = [list(range(n_nodes))] * 2
+    self_edges = np.array(self_edges)
+    edges = np.concatenate([edges, self_edges], axis=1)
+    return edges
+
+
+def cells_to_edges(cells, with_reversed_edges=True, with_self_edges=True):
+    # edge_pairs = []
+    # for cell in cells:
+    #     for p1, p2 in [(0, 1), (1, 2), (0, 2)]:
+    #         edge = sorted([cell[p1], cell[p2]])
+    #         if edge not in edge_pairs:
+    #             edge_pairs.append(edge)
+
+    v0v1 = cells[:, :2]
+    v1v2 = cells[:, 1:]
+    v0v2 = cells[:, :3:2]
+    edge_pairs = np.concatenate((v0v1, v1v2, v0v2), axis=0)
+    edge_pairs = np.sort(edge_pairs, axis=1)
+    edge_pairs = np.unique(edge_pairs, axis=0)
+
     edge_pairs = np.array(edge_pairs).T
-    edge_pairs = add_reversed_edges(edge_pairs)
+    if with_reversed_edges:
+        edge_pairs = add_reversed_edges(edge_pairs)
+    if with_self_edges:
+        edge_pairs = add_self_edges(edge_pairs)
     return edge_pairs
 
 
@@ -106,10 +125,13 @@ def get_meshmorph_data_loader(n_objects, data_folder, batch_size, eval_frac=0.2)
                               edge_attr=torch.from_numpy(edges_attr).type(torch.float32),
                               u=torch.from_numpy(global_attr).type(torch.float32),
                               face=torch.from_numpy(cells).type(torch.long),
+                              cntr_pnt=torch.from_numpy(cnt_vertices).type(torch.float32),
                               x_p=torch.from_numpy(nodes_perturbed).type(torch.float32),
                               edge_index_p=torch.from_numpy(edges_perturbed).type(torch.long),
                               u_p=torch.from_numpy(global_attr_perturbed).type(torch.float32),
-                              face_p=torch.from_numpy(cells_perturbed).type(torch.long))
+                              face_p=torch.from_numpy(cells_perturbed).type(torch.long),
+                              cntr_pnt_p=torch.from_numpy(cnt_vertices_perturbed).type(torch.float32),
+                              )
 
             graph_data_list.append(graph_data)
     train_data = DataLoader(train_graph_data_list, batch_size=batch_size)
@@ -117,7 +139,88 @@ def get_meshmorph_data_loader(n_objects, data_folder, batch_size, eval_frac=0.2)
     return train_data, test_data
 
 
+# def chamfer_loss(data, preds):
+#     edge_attr, node_attr, global_attr = preds
+#     s1, s2 = data.x_p.shape
+#     s3, s4 = node_attr.shape
+#     loss, _ = chamfer_distance(data.x_p.view(1, s1, s2), node_attr.view(1, s3, s4))
+#     return loss
+
+def compute_chamfer_region_weight(x, cntr_points, eps=1e-5):
+    for i, pnt in enumerate(cntr_points):
+        dist = torch.norm(x - pnt, dim=1)
+        if i == 0:
+            min_dist_from_cntr_points = dist
+        else:
+            # equivalent of torch.minimum which is not available in 1.6 version
+            tmp = min_dist_from_cntr_points - dist > 0
+            min_dist_from_cntr_points[tmp] = dist[tmp]
+    weight = 1.0 / (min_dist_from_cntr_points + eps)
+    weight = torch.clamp(weight, 1.0, 10.)
+    return weight
+
+
+def chamfer_distance(x, y, weight=None):
+    idx = knn(y, x, 1)
+    xs, ys = x[idx[0, :], :], y[idx[1, :], :]
+    dist = torch.norm(xs - ys, dim=1)
+    if weight is not None:
+        dist = dist * weight
+    dist_reduced = torch.mean(dist)
+    return dist_reduced
+
+
+def chamfer_loss(ground_mesh_nodes, predicted_mesh_nodes, ground_mesh_weight=None, predicted_mesh_weight=None):
+    dist_ground = chamfer_distance(ground_mesh_nodes, predicted_mesh_nodes, weight=ground_mesh_weight)
+    dist_predicted = chamfer_distance(predicted_mesh_nodes, ground_mesh_nodes, weight=predicted_mesh_weight)
+    loss = 0.5 * (dist_ground + dist_predicted)
+    return loss
+
+
+def edge_loss(data, preds, delta=0.02):
+    edge_attr, node_attr, global_attr = preds
+    edge_index = data.edge_index
+    senders = node_attr[edge_index[0, :], :]
+    receivers = node_attr[edge_index[1, :], :]
+    edge_lengths = torch.sum(abs(senders - receivers), dim=1)
+    large_lengths = abs(edge_lengths) > delta
+    if large_lengths.sum() == 0:
+        loss = 0.
+    else:
+        loss = torch.mean(edge_lengths[large_lengths] ** 2)
+    return loss
+
+l2loss = torch.nn.MSELoss()
+def laplace_loss(node_attr_in, node_attr_out, edge_index, enforced_region=None):
+    n_nodes = len(node_attr_in)
+    e1, e2 = edge_index[0, :], edge_index[1, :]
+    laplace_in = scatter_sum(node_attr_in[e2, :], e1, dim=0, dim_size=n_nodes)
+    laplace_in = 2 * node_attr_in - laplace_in
+    laplace_out = scatter_sum(node_attr_out[e2, :], e1, dim=0, dim_size=n_nodes)
+    laplace_out = 2 * node_attr_out - laplace_out
+    if enforced_region is not None:
+        loss = l2loss(laplace_in[enforced_region, :], laplace_out[enforced_region, :])
+    else:
+        loss = l2loss(laplace_in[:, :2], laplace_out)
+    return loss
+
+
+def get_angles(nodes, face):
+    tri = nodes[face]
+    v1 = tri[:, 0, :] - tri[:, 1, :]
+    v2 = tri[:, 0, :] - tri[:, 2, :]
+    return torch.sign(torch.sum(v1 * v2, dim=1))
+
+
+def loss_angles(in_nodes, out_nodes, faces):
+    angle_in_mesh = get_angles(in_nodes, faces)
+    angle_out_mesh = get_angles(out_nodes, faces)
+    loss = torch.sum((angle_in_mesh != angle_out_mesh).type(torch.float32))
+    return loss
+
+
 def train_mesh_morphing(model, train_data, use_cpu=False, save_name="",
+                        chamfer_loss_lambda=1., edge_loss_lambda=0., laplace_loss_lambda=0., angle_loss_lambda=0.,
                         lr_0=0.001, n_epoch=101, print_every=10, step_size=250, gamma=0.5):
     print("training begins")
 
@@ -142,14 +245,47 @@ def train_mesh_morphing(model, train_data, use_cpu=False, save_name="",
 
             output = model(data)
             if not hasattr(model, 'full_output') or model.full_output is False:
-                loss1 = chamfer_loss(data, output)
+                w1 = compute_chamfer_region_weight(data.x_p, data.cntr_pnt_p)
+                w2 = compute_chamfer_region_weight(output[1], data.cntr_pnt)
+                loss1 = chamfer_loss(data.x_p, output[1], ground_mesh_weight=w1, predicted_mesh_weight=w2)
+                loss1 *= chamfer_loss_lambda
                 loss2 = edge_loss(data, output)
+                loss2 *= edge_loss_lambda
+                moved_node_idx = torch.any(abs(data.x[:, 2:]) > 0., dim=1)
+                dist_from_moved_node = torch.norm(data.x[:, :2] - data.x[moved_node_idx, :2], dim=1)
+                enforced_region = dist_from_moved_node > 0.2
+                loss3 = laplace_loss(data.x, output[1], data.edge_index, enforced_region=enforced_region)
+                loss3 *= laplace_loss_lambda
+                loss4 = loss_angles(data.x, output[1], data.face)
             else:
-                loss1 = [chamfer_loss(data, out) for out in output]
-                loss1 = sum(loss1) / len(loss1)
+                loss1 = 0.
+                w1 = compute_chamfer_region_weight(data.x_p, data.cntr_pnt_p)
+                for out in output:
+                    w2 = None #compute_chamfer_region_weight(out[1], data.cntr_pnt)
+                    loss1 += chamfer_loss(data.x_p, out[1], ground_mesh_weight=w1, predicted_mesh_weight=w2)
+                loss1 /= len(output)
+                loss1 *= chamfer_loss_lambda
                 loss2 = [edge_loss(data, out) for out in output]
-                loss2 = sum(loss2) / len(loss2)
-            loss = loss1 #+ loss2
+                loss2 = sum(loss2) / len(output)
+                loss2 *= edge_loss_lambda
+                loss3 = 0.
+                moved_node_idx = torch.any(abs(data.x[:, 2:]) > 0., dim=1)
+                dist_from_moved_node = torch.norm(data.x[:, :2] - data.x[moved_node_idx, :2], dim=1)
+                enforced_region = dist_from_moved_node > 0.2
+                # for i in range(len(output)):
+                #     x_in = data.x[:, :2] if i == 0 else output[i-1][1]
+                #     x_out = output[i][1]
+                #     loss3 += laplace_loss(x_in, x_out, data.edge_index, enforced_region=enforced_region)
+                # loss3 = loss3 / len(output)
+                loss3 = [laplace_loss(data.x[:, :2], out[1], data.edge_index, enforced_region=enforced_region)
+                         for out in output]
+                loss3 = sum(loss3) / len(output)
+                loss3 *= laplace_loss_lambda
+                loss4 = [loss_angles(data.x, out[1], data.face) for out in output]
+                loss4 = sum(loss4) / len(output)
+                loss4 *= angle_loss_lambda
+
+            loss = loss1 + loss2 + loss3 + loss4
             epoch_loss += loss.item()
             loss.backward()
             optimizer.step()
@@ -158,40 +294,14 @@ def train_mesh_morphing(model, train_data, use_cpu=False, save_name="",
         scheduler.step()
 
         if epoch % print_every == 0:
-            print("loss %0.4f %0.4f" %(loss1, loss2), end=" ")
+            print("loss %0.5f %0.5f %0.5f %0.5f" %(loss1, loss2, loss3, loss4), end=" ")
             lr = optimizer.param_groups[0]['lr']
-            print("epoch %d: learning rate=%0.3e, training loss:%0.4f" % (epoch, lr, epoch_loss))
+            print("epoch %d: learning rate=%0.3e, training loss:%0.5e" % (epoch, lr, epoch_loss))
             torch.save(model.state_dict(), "models/model" + save_name + ".pth")
             np.save("models/loss" + save_name + ".npy", epoch_loss_list)
 
 
-def chamfer_loss(data, preds):
-    edge_attr, node_attr, global_attr = preds
-    s1, s2 = data.x_p.shape
-    s3, s4 = node_attr.shape
-    loss, _ = chamfer_distance(data.x_p.view(1, s1, s2), node_attr.view(1, s3, s4))
-    if loss is None:
-        print("Nan loss")
-    return loss
-
-
-def edge_loss(data, preds, delta=0.1):
-    edge_attr, node_attr, global_attr = preds
-    edge_index = data.edge_index
-    senders = node_attr[edge_index[0, :], :]
-    receivers = node_attr[edge_index[1, :], :]
-    edge_lengths = torch.sum(abs(senders - receivers), dim=1)
-    large_lengths = abs(edge_lengths) > delta
-    if large_lengths.sum() == 0:
-        loss = 0.
-    else:
-        loss = torch.mean(edge_lengths[large_lengths] ** 2)
-    if loss is None:
-        print("Nan loss")
-    return loss
-
-
-def plot_mesh_morphing_results(model, data_loader, ndata=5, save_name=""):
+def plot_mesh_morphing_results(model, data_loader, ndata=5, save_name="", output_idx=(-1,)):
     device = 'cpu'
     model = model.to(device)
     model.load_state_dict(torch.load("models/model" + save_name + ".pth", map_location=device))
@@ -201,11 +311,7 @@ def plot_mesh_morphing_results(model, data_loader, ndata=5, save_name=""):
             if i > ndata:
                 break
             data = data.to(device=device)
-            output = model(data)
-            if hasattr(model, 'full_output') or model.full_output is True:
-                output = output[-1]
             vertices_input = data.x[:, :2]
-            vertices_pred = output[1]  # node features
             vertices_gt = data.x_p
             faces_input = data.face
             faces_pred = data.face
@@ -213,48 +319,55 @@ def plot_mesh_morphing_results(model, data_loader, ndata=5, save_name=""):
 
             mesh_1 = meshio.Mesh(points=vertices_input, cells=[("triangle", faces_input)])
             mesh_2 = meshio.Mesh(points=vertices_gt, cells=[("triangle", faces_gt)])
-            mesh_3 = meshio.Mesh(points=vertices_pred, cells=[("triangle", faces_pred)])
 
-            plt.figure(figsize=(10, 4))
-            plt.subplot(1, 3, 1)
+            output = model(data)
+            output_meshes = []
+            for idx in output_idx:
+                output_mesh = meshio.Mesh(points=output[idx][1], cells=[("triangle", faces_pred)])
+                output_meshes.append(output_mesh)
+            mx1 = min(vertices_input[:, 0].min(), vertices_gt[:, 0].min())
+            mx2 = max(vertices_input[:, 0].max(), vertices_gt[:, 0].max())
+            my1 = min(vertices_input[:, 1].min(), vertices_gt[:, 1].min())
+            my2 = max(vertices_input[:, 1].max(), vertices_gt[:, 1].max())
+            plt.figure(figsize=(15, 4))
+            plt.subplot(1, len(output_idx) + 2, 1)
+
             plot_mesh(mesh_1)
-            plt.xlim((vertices_input[:, 0].min() - 0.1, vertices_gt[:, 0].max() + 0.1))
-            plt.ylim((vertices_input[:, 1].min() - 0.1, vertices_gt[:, 1].max() + 0.1))
-            # plt.gca().set_xticks([])
-            # plt.gca().set_yticks([])
-            plt.subplot(1, 3, 2)
+            plt.xlim((mx1, mx2))
+            plt.ylim((my1, my2))
+
+            plt.subplot(1, len(output_idx) + 2, 2)
             plot_mesh(mesh_2)
-            plt.xlim((vertices_input[:, 0].min() - 0.1, vertices_gt[:, 0].max() + 0.1))
-            plt.ylim((vertices_input[:, 1].min() - 0.1, vertices_gt[:, 1].max() + 0.1))
-            # plt.gca().set_xticks([])
-            # plt.gca().set_yticks([])
-            plt.subplot(1, 3, 3)
-            plot_mesh(mesh_3)
-            # plt.scatter(vertices_pred[:, 0], vertices_pred[:, 1], c='k', marker='.')
-            plt.xlim((vertices_input[:, 0].min() - 0.1, vertices_gt[:, 0].max() + 0.1))
-            plt.ylim((vertices_input[:, 1].min() - 0.1, vertices_gt[:, 1].max() + 0.1))
-            # plt.gca().set_xticks([])
-            # plt.gca().set_yticks([])
+            plt.xlim((mx1, mx2))
+            plt.ylim((my1, my2))
+
+            for i, mesh in enumerate(output_meshes):
+                plt.subplot(1, len(output_idx) + 2, i + 3)
+                plot_mesh(mesh)
+                plt.xlim((mx1, mx2))
+                plt.ylim((my1, my2))
+
             plt.show()
 
 
-n_objects = 10
-data_folder = "../mesh_gen/mesh_morphing/"
-batch_size = 1
-train_data, test_data = get_meshmorph_data_loader(n_objects, data_folder, batch_size, eval_frac=0.2)
+if __name__ == "__main__":
+    n_objects = 10
+    data_folder = "../mesh_gen/mesh_morphing/"
+    batch_size = 1
+    train_data, test_data = get_meshmorph_data_loader(n_objects, data_folder, batch_size, eval_frac=0.2)
 
-n_edge_feat_in, n_edge_feat_out = 4, 1
-n_node_feat_in, n_node_feat_out = 4, 2
-n_global_feat_in, n_global_feat_out = 1, 1
+    n_edge_feat_in, n_edge_feat_out = 4, 1
+    n_node_feat_in, n_node_feat_out = 4, 2
+    n_global_feat_in, n_global_feat_out = 1, 1
 
-model = EncodeProcessDecodeNEW(n_edge_feat_in=n_edge_feat_in, n_edge_feat_out=n_edge_feat_out,
-                               n_node_feat_in=n_node_feat_in, n_node_feat_out=n_node_feat_out,
-                               n_global_feat_in=n_global_feat_in, n_global_feat_out=n_global_feat_out,
-                               mlp_latent_size=16, num_processing_steps=5, full_output=True,
-                               encoder=GraphNetworkIndependentBlock, decoder=GraphNetworkIndependentBlock,
-                               processor=GraphNetworkBlock, output_transformer=GraphNetworkIndependentBlock
-                               )
+    model = EncodeProcessDecodeNEW(n_edge_feat_in=n_edge_feat_in, n_edge_feat_out=n_edge_feat_out,
+                                   n_node_feat_in=n_node_feat_in, n_node_feat_out=n_node_feat_out,
+                                   n_global_feat_in=n_global_feat_in, n_global_feat_out=n_global_feat_out,
+                                   mlp_latent_size=128, num_processing_steps=5, full_output=True,
+                                   encoder=GraphNetworkIndependentBlock, decoder=GraphNetworkIndependentBlock,
+                                   processor=GraphNetworkBlock, output_transformer=GraphNetworkIndependentBlock
+                                   )
 
-
-# train_mesh_morphing(model, train_data, use_cpu=True)
-plot_mesh_morphing_results(model, train_data)
+    # train_mesh_morphing(model, train_data, use_cpu=True,
+    #                     laplace_loss_lambda=1., edge_loss_lambda=1., angle_loss_lambda=1.)
+    plot_mesh_morphing_results(model, train_data, output_idx=(0, -1))
