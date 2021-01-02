@@ -106,7 +106,7 @@ def get_sdf_data_loader(n_objects, data_folder, batch_size, eval_frac=0.2, i_sta
     return train_data, test_data
 
 
-def train_sdf(model, train_data, loss_func=None, use_cpu=False, save_name="",
+def train_sdf(model, train_data, test_data, loss_func=None, use_cpu=False, save_name="",
               lr_0=0.001, n_epoch=101, print_every=10, step_size=50, gamma=0.5):
     assert loss_func is not None, "loss function should be specified"
 
@@ -122,6 +122,8 @@ def train_sdf(model, train_data, loss_func=None, use_cpu=False, save_name="",
     optimizer = torch.optim.Adam(model.parameters(), lr=lr_0)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
     epoch_loss_list = []
+    test_loss = []
+    test_loss_last = []
     for epoch in range(n_epoch):
         epoch_loss = 0
         for data in train_data:
@@ -145,10 +147,27 @@ def train_sdf(model, train_data, loss_func=None, use_cpu=False, save_name="",
         scheduler.step()
 
         if epoch % print_every == 0:
+            for data in test_data:
+                data = data.to(device)
+                model.eval()
+                output = model(data)
+                if not hasattr(model, 'full_output') or model.full_output is False:
+                    x_out, edge_attr_out, global_attr_out = output
+                    loss = loss_func(x_out[1], data.y)
+                else:
+                    loss = [loss_func(out[1], data.y) for out in output]
+                    last_loss = loss[-1]
+                    loss = sum(loss) / len(loss)
+
+                test_loss.append(loss.item())
+                test_loss_last.append(last_loss.item())
             lr = optimizer.param_groups[0]['lr']
-            print("epoch %d: learning rate=%0.3e, training loss:%0.4f" % (epoch, lr, epoch_loss))
+            print("epoch %d: learning rate=%0.3e, training loss:%0.4f, test loss:(%0.4f, %0.4f)"
+                  % (epoch, lr, epoch_loss, test_loss[-1], test_loss_last[-1]))
             torch.save(model.state_dict(), "models/model" + save_name + ".pth")
             np.save("models/loss" + save_name + ".npy", epoch_loss_list)
+            np.save("models/loss_test" + save_name + ".npy", test_loss)
+            np.save("models/loss_test_last" + save_name +".npy", test_loss_last)
 
 
 def plot_sdf_results(model, data_loader, ndata=5, levels=None, border=None, save_name=""):
@@ -258,6 +277,9 @@ def plot_results_over_line(model, data, lines=(-0.5, 0, 0.5), ndata=5, save_name
                 break
             d = d.to(device=device)
             pred = model(d)
+            if isinstance(pred, list):
+                pred = pred[-1]
+            pred = pred[1]
             pred = pred.numpy()[:, 0]
             gt = d.y.numpy()[:, 0]
 
@@ -284,10 +306,10 @@ if __name__ == "__main__":
     data_folder = sys.argv[1]
     edge_weight = True
 
-    n_objects, batch_size, n_epoch = 20, 12, 150
+    n_objects, batch_size, n_epoch = 20, 2, 150
     lr_0, step_size, gamma, radius = 0.001, 200, 0.6, 0.1
 
-    train_data, test_data = get_sdf_data_loader(n_objects, data_folder, batch_size, edge_weight=edge_weight)
+    train_data, test_data = get_sdf_data_loader(n_objects, data_folder, batch_size, edge_weight=edge_weight, i_start=10)
 
     n_edge_feat_in, n_edge_feat_out = 5, 1
     n_node_feat_in, n_node_feat_out = 3, 1
@@ -303,7 +325,7 @@ if __name__ == "__main__":
 
     l1_loss = torch.nn.L1Loss()
 
-    train_sdf(model, train_data, loss_func=l1_loss, use_cpu=False, n_epoch=n_epoch)
+    train_sdf(model, train_data, loss_func=l1_loss, use_cpu=True, n_epoch=n_epoch)
 
     plot_sdf_results(model, train_data)
     # plot_results(model, train_data, ndata=5, levels=[-0.2, 0, 0.2, 0.4], border=0.1, save_name="test")
